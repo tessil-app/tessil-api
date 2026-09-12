@@ -27,6 +27,7 @@ sudo install -d -m 0755 /etc/nginx/snippets
 sudo install -m 0644 nginx/snippets/security-headers.conf  /etc/nginx/snippets/tessil-security-headers.conf
 sudo install -m 0644 nginx/snippets/api-tolerances.conf    /etc/nginx/snippets/tessil-api-tolerances.conf
 sudo install -m 0644 nginx/snippets/download-route.conf    /etc/nginx/snippets/tessil-download-route.conf
+sudo install -m 0644 nginx/snippets/web-routing.conf       /etc/nginx/snippets/tessil-web-routing.conf
 ```
 
 ### Wire them into the vhosts
@@ -40,22 +41,17 @@ server {
     # ... existing Ploi config (root, ssl_certificate, etc.) ...
 
     include snippets/tessil-security-headers.conf;
-    include snippets/tessil-download-route.conf;   # robots-noindex on /d/*
+    include snippets/tessil-download-route.conf;   # X-Robots-Tag on client-only routes
+    include snippets/tessil-web-routing.conf;      # try_files, redirects, 404s, asset cache
 
-    # ... rest of existing config ...
-    # Two blocks, and both matter:
-
-    location = / {
-        try_files /index.html =404;
-    }
-
-    location / {
-        try_files $uri $uri.html /200.html /index.html;
-    }
+    # ... rest of existing config, with NO other try_files or location / block ...
 }
 ```
 
-**Why it is two blocks.** `$uri.html` serves the prerendered pages
+`web-routing.conf` owns every `location` for the static build. The rest of
+this section explains the two blocks inside it that are easy to get wrong.
+
+**Why `/` has its own block.** `$uri.html` serves the prerendered pages
 (`/compare/x` -> `compare/x.html`, `/security` -> `security.html`). `/200.html`
 is the SPA shell, and it is deliberately not `index.html`, because `index.html`
 is the prerendered homepage and adapter-static would overwrite it with the
@@ -68,27 +64,43 @@ would land on `/200.html` once that file exists and serve an empty shell as the
 homepage, silently undoing the prerendering. `location = /` takes priority over
 the prefix match and pins `/` to the real `index.html` in every build state.
 
-The trailing `/index.html` in the second block is what makes the line safe to
-apply before the frontend deploy: nginx tests every argument but the last as a
-file, so a build with no `200.html` yet falls through to `index.html` and
-behaves exactly as it did before.
+**What the snippet adds beyond the fallback** (2026-09, from the SEO audit,
+docs/audit/35): `.html` and trailing-slash URLs 301 to the canonical form,
+`/200.html` is `internal` so it cannot be indexed as an empty page, unknown
+paths return a real **404** status with the shell as the body so the client
+router still draws its not-found page, `/d/` keeps its 200, and
+`/_app/immutable/` gets a one-year cache. `expires` is used there instead of
+`add_header` so the server-scope security headers are still inherited.
+
+The snippet has no `/index.html` fallback argument, so it must land **after**
+a build that contains `200.html`. That has been true since 2026-07-25.
 
 **Verify after any change**, because both failure modes here look like unrelated
 bugs and both happened on 2026-07-25:
 
 ```bash
-for p in / /d/probe /security /compare/wetransfer-alternative /200.html; do
-  curl -s -o /dev/null -w "$p %{http_code} %{size_download}\n" "https://tessil.app$p"
+for p in / /d/probe /security /compare/wetransfer-alternative /sitemap.xml \
+         /200.html /index.html /security.html /security/ /nope; do
+  curl -s -o /dev/null -w "$p %{http_code} %{redirect_url}\n" "https://tessil.app$p"
 done
 ```
+
+Expected: `/`, `/d/probe`, `/security`, the compare page and `/sitemap.xml`
+return 200; `/200.html` and `/nope` return **404**; `/index.html` 301s to `/`;
+`/security.html` and `/security/` 301 to `/security`.
 
 `/` must return the full prerendered homepage (over 20 KB), not a 3 KB shell.
 Pointing at a missing `/200.html` with no further fallback returns nginx **500**
 on `/` and on every `/d/` link. Dropping the fallback argument entirely returns
 **404** for the same paths while real files keep serving normally.
 
-`/d/*` is served by the SPA fallback, so no `/d`-specific location block is
-needed; `download-route.conf` adds the `X-Robots-Tag` at server scope.
+`/d/*` has its own block so it stays a 200 while every other unknown path is a
+404; `download-route.conf` adds the `X-Robots-Tag` at server scope.
+
+**`www.tessil.app`** has no DNS record at all. The cheapest fix is at the
+Cloudflare edge, not in nginx: add a proxied `www` CNAME to `tessil.app` and a
+redirect rule `www.tessil.app/*` to `https://tessil.app/$1` (301), the same
+mechanism as the old-domain bulk redirect. No origin cert or vhost needed.
 
 Edit `/etc/nginx/sites-available/api.tessil.app.conf` (API):
 
