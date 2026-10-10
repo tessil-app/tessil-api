@@ -37,7 +37,7 @@ import { env } from "../../src/config/env";
 import { db } from "../../src/db";
 import { transferPasses, transfers, users } from "../../src/db/schema";
 import { createFile } from "../../src/services/file.service";
-import { cleanupUnpaidPasses } from "../../src/services/pass.service";
+import { cleanupUnpaidPasses, voidPassByCheckout } from "../../src/services/pass.service";
 import { resetRateLimits } from "../../src/services/ratelimit.service";
 import { authedRequest, createAuthedUser } from "../helpers/auth";
 import { ensureMigrations, resetDb } from "../helpers/db";
@@ -292,6 +292,92 @@ describe("paywall on: spending a pass", () => {
     }
     const fourth = await createTransferWith({ expiresInHours: 24, passToken: token });
     expect(fourth.status).toBe(429);
+  });
+});
+
+describe("paywall on: every upload route holds the gate", () => {
+  const fileBody = (transferId: string) => ({
+    transferId,
+    contentType: "application/octet-stream",
+    encryptedName: "x".repeat(32),
+    encryptedNameIv: "y".repeat(24),
+    fileIv: "z".repeat(24),
+    size: 1024,
+  });
+
+  it("a transfer created before the paywall cannot take files or complete", async () => {
+    env.PAYWALL_ENABLED = false;
+    const created = await createTransferWith({ expiresInHours: 24 });
+    const { transferId } = (await created.json()) as { transferId: string };
+    await seedFile(transferId);
+    env.PAYWALL_ENABLED = true;
+
+    const init = await app.handle(post("/api/upload/init-multipart", fileBody(transferId)));
+    expect(init.status).toBe(402);
+    const done = await app.handle(post("/api/upload/complete", { transferId }));
+    expect(done.status).toBe(402);
+  });
+
+  it("a completed transfer takes no more files", async () => {
+    const token = await buyPass();
+    const created = await createTransferWith({ expiresInHours: 24, passToken: token });
+    const { transferId } = (await created.json()) as { transferId: string };
+    await seedFile(transferId);
+    await app.handle(post("/api/upload/complete", { transferId }));
+
+    const init = await app.handle(post("/api/upload/init-multipart", fileBody(transferId)));
+    expect(init.status).toBe(409);
+    const again = await app.handle(post("/api/upload/complete", { transferId }));
+    expect(again.status).toBe(409);
+  });
+
+  it("a sibling transfer stops taking files once the pass is spent", async () => {
+    const token = await buyPass();
+    const a = (await (await createTransferWith({ expiresInHours: 24, passToken: token })).json()) as {
+      transferId: string;
+    };
+    const b = (await (await createTransferWith({ expiresInHours: 24, passToken: token })).json()) as {
+      transferId: string;
+    };
+    await seedFile(a.transferId);
+    await app.handle(post("/api/upload/complete", { transferId: a.transferId }));
+
+    const init = await app.handle(post("/api/upload/init-multipart", fileBody(b.transferId)));
+    expect(init.status).toBe(402);
+  });
+
+  it("a lapsed subscriber cannot finish a transfer started while subscribed", async () => {
+    const { user, cookie } = await createAuthedUser();
+    await db.update(users).set({ tier: "pro" }).where(eq(users.id, user.id));
+    const authedPost = (path: string, body: object) =>
+      authedRequest(cookie, `${APP_URL}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    const created = await app.handle(authedPost("/api/upload/create-transfer", { expiresInHours: 24 }));
+    const { transferId } = (await created.json()) as { transferId: string };
+    await seedFile(transferId);
+
+    await db.update(users).set({ tier: "free" }).where(eq(users.id, user.id));
+    const done = await app.handle(authedPost("/api/upload/complete", { transferId }));
+    expect(done.status).toBe(402);
+  });
+
+  it("a refund voids an unused pass and leaves a spent one alone", async () => {
+    const unused = await buyPass();
+    const unusedCheckout = `chk_test_${checkoutCounter}`;
+    expect(await voidPassByCheckout(unusedCheckout)).toBe(true);
+    const res = await createTransferWith({ expiresInHours: 24, passToken: unused });
+    expect(res.status).toBe(402);
+
+    const spent = await buyPass();
+    const spentCheckout = `chk_test_${checkoutCounter}`;
+    const created = await createTransferWith({ expiresInHours: 24, passToken: spent });
+    const { transferId } = (await created.json()) as { transferId: string };
+    await seedFile(transferId);
+    await app.handle(post("/api/upload/complete", { transferId }));
+    expect(await voidPassByCheckout(spentCheckout)).toBe(false);
   });
 });
 

@@ -17,9 +17,11 @@ import { resolveTransferCaps } from '../config/tiers';
 import {
   completeTransferWithPass,
   hasOpenTransferSlot,
+  isPassUsable,
   PassAlreadyUsedError,
   resolvePass,
 } from '../services/pass.service';
+import type { Transfer } from '../db/schema';
 import { exceedsTotalLimit } from '../utils/limits';
 import { authPlugin } from '../auth/middleware';
 import { ipContextPlugin } from '../auth/ipContextPlugin';
@@ -51,6 +53,24 @@ function decodeBase64Url(input: string): Uint8Array | null {
     return null;
   }
 }
+
+// The paywall has to hold on every route that moves or publishes bytes,
+// not only on create-transfer. A transfer stays paid for while its pass
+// is unspent, or while its owner is still subscribed.
+async function isUploadPaidFor(
+  transfer: Transfer,
+  me: { id: string; tier: string } | null | undefined,
+): Promise<boolean> {
+  if (!env.PAYWALL_ENABLED) return true;
+  if (transfer.passId) return isPassUsable(transfer.passId);
+  return me?.tier === 'pro' && transfer.userId === me.id;
+}
+
+const PAYMENT_REQUIRED = {
+  error: 'Sending needs a pass or a subscription.',
+  code: 'payment_required',
+  upgradeUrl: '/pricing',
+} as const;
 
 export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
   .use(authPlugin)
@@ -202,6 +222,18 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
     if (transfer.userId !== null && transfer.userId !== me?.id) {
       set.status = 404;
       return { error: 'Transfer not found or has expired' };
+    }
+
+    // A live transfer is frozen. Without this, anyone holding the ID of
+    // a completed anonymous transfer could keep adding files to it.
+    if (transfer.isCompleted) {
+      set.status = 409;
+      return { error: 'Transfer is already completed' };
+    }
+
+    if (!(await isUploadPaidFor(transfer, me))) {
+      set.status = 402;
+      return PAYMENT_REQUIRED;
     }
 
     const caps = resolveTransferCaps(me, transfer.passId !== null);
@@ -457,6 +489,16 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
         set.status = 409;
         return { error: 'Upload incomplete — file size mismatch.' };
       }
+    }
+
+    if (transfer.isCompleted) {
+      set.status = 409;
+      return { error: 'Transfer is already completed' };
+    }
+
+    if (!transfer.passId && !(await isUploadPaidFor(transfer, me))) {
+      set.status = 402;
+      return PAYMENT_REQUIRED;
     }
 
     if (transfer.passId) {

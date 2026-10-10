@@ -12,7 +12,7 @@ import { env } from "../config/env";
 import { paidCaps } from "../config/tiers";
 import { db } from "../db";
 import { billingEvents, subscriptions, users, type Subscription } from "../db/schema";
-import { createPass, resolvePass } from "../services/pass.service";
+import { createPass, resolvePass, voidPassByCheckout } from "../services/pass.service";
 import {
   createPortalSession,
   createProCheckout,
@@ -363,6 +363,13 @@ export const billingRoutes = new Elysia({ prefix: "/api/billing" })
           case "subscription.revoked":
             result = await applyTerminalCancel(event.data as unknown as PolarSubscriptionData);
             break;
+          case "order.refunded": {
+            // Only pass orders carry a checkout we know; anything else no-ops.
+            const checkoutId = (event.data as unknown as { checkoutId?: string | null }).checkoutId;
+            const voided = checkoutId ? await voidPassByCheckout(checkoutId) : false;
+            result = { ok: true, reason: voided ? "pass voided" : "no unused pass for order" };
+            break;
+          }
           default:
             result = { ok: true, reason: "ignored event type" };
         }

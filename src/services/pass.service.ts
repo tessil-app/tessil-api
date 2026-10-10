@@ -80,6 +80,28 @@ export async function hasOpenTransferSlot(passId: string): Promise<boolean> {
   return (row?.count ?? 0) < MAX_OPEN_TRANSFERS_PER_PASS;
 }
 
+/** True while the pass is paid for and has not bought a transfer yet. */
+export async function isPassUsable(passId: string): Promise<boolean> {
+  const [pass] = await db
+    .select({ paidAt: transferPasses.paidAt, consumedAt: transferPasses.consumedAt })
+    .from(transferPasses)
+    .where(eq(transferPasses.id, passId))
+    .limit(1);
+  return !!pass && pass.paidAt !== null && pass.consumedAt === null;
+}
+
+/**
+ * A refunded pass must stop working. Spent passes are left alone: the
+ * transfer they bought already exists and expires on its own.
+ */
+export async function voidPassByCheckout(checkoutId: string): Promise<boolean> {
+  const voided = await db
+    .delete(transferPasses)
+    .where(and(eq(transferPasses.polarCheckoutId, checkoutId), isNull(transferPasses.consumedAt)))
+    .returning({ id: transferPasses.id });
+  return voided.length > 0;
+}
+
 export class PassAlreadyUsedError extends Error {
   constructor() {
     super("Pass already used");
