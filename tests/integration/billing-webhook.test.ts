@@ -388,6 +388,60 @@ describe("POST /api/billing/webhook — idempotent delivery", () => {
   });
 });
 
+describe("POST /api/billing/webhook — retry after a failed delivery", () => {
+  it("re-runs a delivery whose handler failed instead of deduplicating it", async () => {
+    // A cancel for a user that does not exist yet violates the FK on
+    // subscriptions.user_id, so the handler throws on the first delivery.
+    const userId = "retry-user-0000000001";
+    const signed = signEvent(
+      subscriptionCanceledPayload({
+        subscriptionId: "sub_retry",
+        customerId: "cus_retry",
+        externalId: userId,
+      }),
+      "msg_retry_1",
+    );
+    const deliver = () =>
+      app.handle(
+        new Request(`${APP_URL}/api/billing/webhook`, {
+          method: "POST",
+          headers: signed.headers,
+          body: signed.body,
+        }),
+      );
+
+    const first = await deliver();
+    expect(first.status).toBe(500);
+    const [failed] = await db
+      .select()
+      .from(billingEvents)
+      .where(eq(billingEvents.polarEventId, "msg_retry_1"));
+    expect(failed?.processedAt).toBeNull();
+    expect(failed?.error).not.toBeNull();
+
+    // The transient cause clears; Polar redelivers with the same webhook-id.
+    await db.insert(users).values({ id: userId, email: "retry@tessil.test", tier: "pro" });
+    const second = await deliver();
+    expect(second.status).toBe(200);
+    const body = (await second.json()) as { ok: boolean; deduplicated?: boolean };
+    expect(body.deduplicated).toBeUndefined();
+
+    const [user] = await db.select().from(users).where(eq(users.id, userId));
+    expect(user?.tier).toBe("free");
+    const eventRows = await db
+      .select()
+      .from(billingEvents)
+      .where(eq(billingEvents.polarEventId, "msg_retry_1"));
+    expect(eventRows).toHaveLength(1);
+    expect(eventRows[0]?.processedAt).not.toBeNull();
+    expect(eventRows[0]?.error).toBeNull();
+
+    // Once it has been applied, a further delivery is a true duplicate.
+    const third = await deliver();
+    expect(((await third.json()) as { deduplicated?: boolean }).deduplicated).toBe(true);
+  });
+});
+
 // ─── Auth gates on checkout + portal ─────────────────────────────────────────
 
 describe("POST /api/billing/checkout — auth gate", () => {

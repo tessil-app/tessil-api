@@ -35,7 +35,7 @@ mock.module("../../src/services/polar.service", () => ({
 import { createApp } from "../../src/app";
 import { env } from "../../src/config/env";
 import { db } from "../../src/db";
-import { transferPasses, transfers, users } from "../../src/db/schema";
+import { files, transferPasses, transfers, users } from "../../src/db/schema";
 import { createFile } from "../../src/services/file.service";
 import { cleanupUnpaidPasses, voidPassByCheckout } from "../../src/services/pass.service";
 import { resetRateLimits } from "../../src/services/ratelimit.service";
@@ -378,6 +378,46 @@ describe("paywall on: every upload route holds the gate", () => {
     await seedFile(transferId);
     await app.handle(post("/api/upload/complete", { transferId }));
     expect(await voidPassByCheckout(spentCheckout)).toBe(false);
+  });
+});
+
+describe("completed transfers are frozen, paywall or not", () => {
+  it("rejects per-file calls and keeps the file", async () => {
+    env.PAYWALL_ENABLED = false;
+    const created = await createTransferWith({ expiresInHours: 24 });
+    const { transferId } = (await created.json()) as { transferId: string };
+    const file = await seedFile(transferId);
+    const done = await app.handle(post("/api/upload/complete", { transferId }));
+    expect(done.status).toBe(200);
+
+    // Anyone holding the link knows the transfer and file IDs.
+    const abort = await app.handle(
+      post("/api/upload/abort-multipart", { transferId, fileId: file.id, uploadId: "any" }),
+    );
+    expect(abort.status).toBe(409);
+    const finish = await app.handle(
+      post("/api/upload/complete-multipart", {
+        transferId,
+        fileId: file.id,
+        uploadId: "any",
+        parts: [{ partNumber: 1, etag: "etag" }],
+      }),
+    );
+    expect(finish.status).toBe(409);
+    const add = await app.handle(
+      post("/api/upload/init-multipart", {
+        transferId,
+        contentType: "application/octet-stream",
+        encryptedName: "x".repeat(32),
+        encryptedNameIv: "y".repeat(24),
+        fileIv: "z".repeat(24),
+        size: 1024,
+      }),
+    );
+    expect(add.status).toBe(409);
+
+    const left = await db.select().from(files).where(eq(files.transferId, transferId));
+    expect(left).toHaveLength(1);
   });
 });
 

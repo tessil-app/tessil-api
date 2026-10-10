@@ -332,7 +332,7 @@ export const billingRoutes = new Elysia({ prefix: "/api/billing" })
         return { error: "Malformed webhook payload" };
       }
 
-      const eventRowId = nanoid();
+      let eventRowId = nanoid();
       try {
         await db.insert(billingEvents).values({
           id: eventRowId,
@@ -341,10 +341,23 @@ export const billingRoutes = new Elysia({ prefix: "/api/billing" })
           rawPayload: event as unknown as Record<string, unknown>,
         });
       } catch {
-        // UNIQUE violation on polar_event_id = already processed.
-        // Return 200 so Polar stops retrying.
-        console.warn("[billing] duplicate webhook delivery, skipping:", event.type);
-        return { ok: true, deduplicated: true };
+        // UNIQUE violation on polar_event_id: we have seen this delivery.
+        // Only a delivery whose handler finished is a duplicate. One that
+        // failed must run again, or a cancellation or refund that hit a
+        // transient error would be acknowledged and never applied.
+        const [seen] = await db
+          .select({ id: billingEvents.id, processedAt: billingEvents.processedAt })
+          .from(billingEvents)
+          .where(eq(billingEvents.polarEventId, polarEventId));
+        if (!seen) {
+          set.status = 500;
+          return { error: "Could not record the event" };
+        }
+        if (seen.processedAt) {
+          console.warn("[billing] duplicate webhook delivery, skipping:", event.type);
+          return { ok: true, deduplicated: true };
+        }
+        eventRowId = seen.id;
       }
 
       // Unknown event types are audited but otherwise ignored, so
