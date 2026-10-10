@@ -164,6 +164,10 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       set.status = 404;
       return { error: 'Transfer not found or has expired' };
     }
+    if (transfer.isCompleted) {
+      set.status = 409;
+      return { error: 'Transfer is already completed' };
+    }
 
     // Tier-aware file size cap.
     if (size > caps.maxFileSize) {
@@ -263,6 +267,10 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       set.status = 404;
       return { error: 'Transfer not found or has expired' };
     }
+    if (transfer.isCompleted) {
+      set.status = 409;
+      return { error: 'Transfer is already completed' };
+    }
 
     const file = await getFileById(fileId);
     if (!file || file.transferId !== transferId) {
@@ -318,6 +326,10 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
     if (transfer.userId !== null && transfer.userId !== me?.id) {
       set.status = 404;
       return { error: 'Transfer not found or has expired' };
+    }
+    if (transfer.isCompleted) {
+      set.status = 409;
+      return { error: 'Transfer is already completed' };
     }
 
     const file = await getFileById(fileId);

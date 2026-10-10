@@ -15,7 +15,7 @@ import { eq } from "drizzle-orm";
 import { createApp } from "../../src/app";
 import { db } from "../../src/db";
 import { files, transfers } from "../../src/db/schema";
-import { createTransfer } from "../../src/services/file.service";
+import { completeTransfer, createFile, createTransfer } from "../../src/services/file.service";
 // Resolves to the stub from tests/setup.ts, which mirrors the production value.
 // Deriving the assertions from it stops the test drifting from prod again.
 import { MULTIPART_PART_SIZE } from "../../src/services/r2.service";
@@ -275,5 +275,50 @@ describe("POST /api/upload/abort-multipart", () => {
       })),
     );
     expect(res.status).toBe(204);
+  });
+});
+
+// Anyone holding a share link knows the transfer and file IDs, so a
+// completed transfer must reject every per-file mutation.
+describe("completed transfers are frozen", () => {
+  it("rejects add, finish and abort, and keeps the file", async () => {
+    const transfer = await createTransfer(1);
+    const file = await createFile({
+      transferId: transfer.id,
+      size: 1024,
+      mimeType: FILE_FIELDS.contentType,
+      encryptedName: FILE_FIELDS.encryptedName,
+      encryptedNameIv: FILE_FIELDS.encryptedNameIv,
+      fileIv: FILE_FIELDS.fileIv,
+    });
+    await completeTransfer(transfer.id);
+
+    const call = (path: string, body: object) =>
+      app.handle(new Request(`${APP_URL}/api/upload/${path}`, jsonBody(body)));
+
+    const abort = await call("abort-multipart", {
+      transferId: transfer.id,
+      fileId: file.id,
+      uploadId: "any",
+    });
+    expect(abort.status).toBe(409);
+
+    const finish = await call("complete-multipart", {
+      transferId: transfer.id,
+      fileId: file.id,
+      uploadId: "any",
+      parts: [{ partNumber: 1, etag: "etag" }],
+    });
+    expect(finish.status).toBe(409);
+
+    const add = await call("init-multipart", {
+      transferId: transfer.id,
+      size: 1024,
+      ...FILE_FIELDS,
+    });
+    expect(add.status).toBe(409);
+
+    const left = await db.select().from(files).where(eq(files.transferId, transfer.id));
+    expect(left).toHaveLength(1);
   });
 });
