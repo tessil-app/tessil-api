@@ -479,6 +479,31 @@ describe("POST /api/billing/webhook — stale events", () => {
     expect(sub?.status).toBe("canceled");
   });
 
+  it("a cancel and a late 'active' delivered at the same moment end as cancelled", async () => {
+    for (let round = 0; round < 5; round++) {
+      const { user } = await createAuthedUser();
+      const ids = {
+        subscriptionId: `sub_race_${round}`,
+        customerId: `cus_race_${round}`,
+        externalId: user.id,
+      };
+      const t0 = new Date(Date.now() - 60_000).toISOString();
+      const t1 = new Date(Date.now() - 30_000).toISOString();
+      await send({ ...subscriptionCreatedPayload(ids), timestamp: t0 }, `msg_race_c_${round}`);
+
+      await Promise.all([
+        send({ ...subscriptionCanceledPayload(ids), timestamp: t1 }, `msg_race_x_${round}`),
+        send(
+          { ...subscriptionCreatedPayload(ids), type: "subscription.active", timestamp: t0 },
+          `msg_race_a_${round}`,
+        ),
+      ]);
+
+      const [after] = await db.select().from(users).where(eq(users.id, user.id));
+      expect(after?.tier).toBe("free");
+    }
+  });
+
   it("an older update does not overwrite a newer one", async () => {
     const { user } = await createAuthedUser();
     const ids = { subscriptionId: "sub_order", customerId: "cus_order", externalId: user.id };

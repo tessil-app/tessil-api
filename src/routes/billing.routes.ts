@@ -43,11 +43,12 @@ interface PolarSubscriptionData {
   };
 }
 
-// When Polar says the event happened. Falls back to now for a payload
-// without a usable timestamp, which then simply counts as the newest.
+// When Polar says the event happened. A payload without a usable
+// timestamp sorts as the oldest possible event, so it can create a
+// subscription but can never overwrite state we already hold.
 function eventTime(raw: unknown): Date {
   const parsed = raw instanceof Date ? raw : typeof raw === "string" ? new Date(raw) : null;
-  return parsed && !Number.isNaN(parsed.getTime()) ? parsed : new Date();
+  return parsed && !Number.isNaN(parsed.getTime()) ? parsed : new Date(0);
 }
 
 interface HandlerResult {
@@ -55,6 +56,15 @@ interface HandlerResult {
   reason?: string;
   subscriptionId?: string;
 }
+
+function toDate(value: Date | string): Date {
+  return typeof value === "string" ? new Date(value) : value;
+}
+
+// Both handlers run in a transaction that first locks the user row, so
+// two deliveries for the same user are applied one after the other and
+// the subscription row and users.tier can never disagree. `updatedAt`
+// holds the time of the newest event applied, on both paths.
 
 // Single upsert path for every "subscription is currently in state X"
 // event. `subscription.created`, `.updated`, `.active`, `.past_due`,
@@ -71,120 +81,125 @@ async function applySubscriptionState(
     return { ok: false, reason: "no external id" };
   }
 
-  const [user] = await db.select().from(users).where(eq(users.id, externalId));
-  if (!user) {
-    console.warn(`[billing] event for ${data.id} references unknown user ${externalId}`);
-    return { ok: false, reason: "user not found" };
-  }
+  return db.transaction(async (tx) => {
+    const [user] = await tx.select().from(users).where(eq(users.id, externalId)).for("update");
+    if (!user) {
+      console.warn(`[billing] event for ${data.id} references unknown user ${externalId}`);
+      return { ok: false, reason: "user not found" };
+    }
 
-  const periodEnd =
-    typeof data.currentPeriodEnd === "string"
-      ? new Date(data.currentPeriodEnd)
-      : data.currentPeriodEnd;
+    const [existing] = await tx
+      .select({
+        id: subscriptions.id,
+        updatedAt: subscriptions.updatedAt,
+        canceledAt: subscriptions.canceledAt,
+      })
+      .from(subscriptions)
+      .where(eq(subscriptions.polarSubscriptionId, data.id));
 
-  const [existing] = await db
-    .select({
-      id: subscriptions.id,
-      updatedAt: subscriptions.updatedAt,
-      canceledAt: subscriptions.canceledAt,
-    })
-    .from(subscriptions)
-    .where(eq(subscriptions.polarSubscriptionId, data.id));
+    // Deliveries can arrive late or be retried out of order. Anything
+    // older than what we hold, and anything for a subscription that has
+    // already ended, is dropped rather than allowed to hand the plan back.
+    if (existing && (existing.canceledAt || eventAt < existing.updatedAt)) {
+      return { ok: true, reason: "stale event ignored", subscriptionId: existing.id };
+    }
 
-  // Deliveries can arrive late or be retried out of order. `updatedAt`
-  // holds the time of the newest event applied, so anything older, and
-  // anything for a subscription that has already ended, is dropped
-  // rather than allowed to hand the plan back.
-  if (existing && (existing.canceledAt || eventAt < existing.updatedAt)) {
-    return { ok: true, reason: "stale event ignored", subscriptionId: existing.id };
-  }
-
-  let subscriptionId: string;
-  if (existing) {
-    await db
-      .update(subscriptions)
-      .set({
+    const periodEnd = toDate(data.currentPeriodEnd);
+    let subscriptionId: string;
+    if (existing) {
+      await tx
+        .update(subscriptions)
+        .set({
+          status: data.status,
+          currentPeriodEnd: periodEnd,
+          cancelAtPeriodEnd: data.cancelAtPeriodEnd,
+          updatedAt: eventAt,
+        })
+        .where(eq(subscriptions.id, existing.id));
+      subscriptionId = existing.id;
+    } else {
+      subscriptionId = nanoid();
+      await tx.insert(subscriptions).values({
+        id: subscriptionId,
+        userId: user.id,
+        polarSubscriptionId: data.id,
         status: data.status,
         currentPeriodEnd: periodEnd,
         cancelAtPeriodEnd: data.cancelAtPeriodEnd,
+        createdAt: eventAt,
         updatedAt: eventAt,
+      });
+    }
+
+    // Sync the user's tier and persist the customer ID on first sight.
+    // polarCustomerId is set-once.
+    await tx
+      .update(users)
+      .set({
+        tier: tierFromStatus(data.status),
+        ...(user.polarCustomerId ? {} : { polarCustomerId: data.customerId }),
       })
-      .where(eq(subscriptions.id, existing.id));
-    subscriptionId = existing.id;
-  } else {
-    subscriptionId = nanoid();
-    await db.insert(subscriptions).values({
-      id: subscriptionId,
-      userId: user.id,
-      polarSubscriptionId: data.id,
-      status: data.status,
-      currentPeriodEnd: periodEnd,
-      cancelAtPeriodEnd: data.cancelAtPeriodEnd,
-      createdAt: eventAt,
-      updatedAt: eventAt,
-    });
-  }
+      .where(eq(users.id, user.id));
 
-  // Sync the user's tier and persist the customer ID on first sight.
-  // polarCustomerId is set-once.
-  await db
-    .update(users)
-    .set({
-      tier: tierFromStatus(data.status),
-      ...(user.polarCustomerId ? {} : { polarCustomerId: data.customerId }),
-    })
-    .where(eq(users.id, user.id));
-
-  return { ok: true, subscriptionId };
+    return { ok: true, subscriptionId };
+  });
 }
 
-// Terminal cancel — row is closed out, user drops to Free.
-async function applyTerminalCancel(data: PolarSubscriptionData): Promise<HandlerResult> {
+// Terminal cancel: row is closed out, user drops to Free. Always
+// applied, since nothing can follow it on the same subscription.
+async function applyTerminalCancel(
+  data: PolarSubscriptionData,
+  eventAt: Date,
+): Promise<HandlerResult> {
   const externalId = data.customer.externalId;
   if (!externalId) {
     return { ok: false, reason: "no external id" };
   }
 
-  const now = new Date();
-  const [existing] = await db
-    .select({ id: subscriptions.id, userId: subscriptions.userId })
-    .from(subscriptions)
-    .where(eq(subscriptions.polarSubscriptionId, data.id));
+  // A cancel is always applied, so an unusable timestamp is recorded as now.
+  const at = eventAt.getTime() === 0 ? new Date() : eventAt;
 
-  if (!existing) {
-    // Never saw the create event — insert a row in terminal state so
-    // the audit trail isn't a gap.
-    const subscriptionId = nanoid();
-    await db.insert(subscriptions).values({
-      id: subscriptionId,
-      userId: externalId,
-      polarSubscriptionId: data.id,
-      status: data.status,
-      currentPeriodEnd:
-        typeof data.currentPeriodEnd === "string"
-          ? new Date(data.currentPeriodEnd)
-          : data.currentPeriodEnd,
-      cancelAtPeriodEnd: data.cancelAtPeriodEnd,
-      createdAt: now,
-      updatedAt: now,
-      canceledAt: now,
-    });
-    await db.update(users).set({ tier: "free" }).where(eq(users.id, externalId));
-    return { ok: true, subscriptionId };
-  }
+  return db.transaction(async (tx) => {
+    await tx.select({ id: users.id }).from(users).where(eq(users.id, externalId)).for("update");
 
-  await db
-    .update(subscriptions)
-    .set({
-      status: data.status,
-      cancelAtPeriodEnd: data.cancelAtPeriodEnd,
-      updatedAt: now,
-      canceledAt: now,
-    })
-    .where(eq(subscriptions.id, existing.id));
+    const [existing] = await tx
+      .select({ id: subscriptions.id, userId: subscriptions.userId })
+      .from(subscriptions)
+      .where(eq(subscriptions.polarSubscriptionId, data.id));
 
-  await db.update(users).set({ tier: "free" }).where(eq(users.id, existing.userId));
-  return { ok: true, subscriptionId: existing.id };
+    if (!existing) {
+      // Never saw the create event: insert a row in terminal state so
+      // the audit trail isn't a gap. An unknown user fails the FK here,
+      // which rolls back and lets Polar retry.
+      const subscriptionId = nanoid();
+      await tx.insert(subscriptions).values({
+        id: subscriptionId,
+        userId: externalId,
+        polarSubscriptionId: data.id,
+        status: data.status,
+        currentPeriodEnd: toDate(data.currentPeriodEnd),
+        cancelAtPeriodEnd: data.cancelAtPeriodEnd,
+        createdAt: at,
+        updatedAt: at,
+        canceledAt: at,
+      });
+      await tx.update(users).set({ tier: "free" }).where(eq(users.id, externalId));
+      return { ok: true, subscriptionId };
+    }
+
+    await tx
+      .update(subscriptions)
+      .set({
+        status: data.status,
+        cancelAtPeriodEnd: data.cancelAtPeriodEnd,
+        updatedAt: at,
+        canceledAt: at,
+      })
+      .where(eq(subscriptions.id, existing.id));
+
+    await tx.update(users).set({ tier: "free" }).where(eq(users.id, existing.userId));
+    return { ok: true, subscriptionId: existing.id };
+  });
 }
 
 export const billingRoutes = new Elysia({ prefix: "/api/billing" })
@@ -398,7 +413,10 @@ export const billingRoutes = new Elysia({ prefix: "/api/billing" })
             break;
           case "subscription.canceled":
           case "subscription.revoked":
-            result = await applyTerminalCancel(event.data as unknown as PolarSubscriptionData);
+            result = await applyTerminalCancel(
+              event.data as unknown as PolarSubscriptionData,
+              eventTime((event as { timestamp?: unknown }).timestamp),
+            );
             break;
           case "order.refunded": {
             // Only pass orders carry a checkout we know; anything else no-ops.
