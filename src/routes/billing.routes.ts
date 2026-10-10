@@ -43,6 +43,13 @@ interface PolarSubscriptionData {
   };
 }
 
+// When Polar says the event happened. Falls back to now for a payload
+// without a usable timestamp, which then simply counts as the newest.
+function eventTime(raw: unknown): Date {
+  const parsed = raw instanceof Date ? raw : typeof raw === "string" ? new Date(raw) : null;
+  return parsed && !Number.isNaN(parsed.getTime()) ? parsed : new Date();
+}
+
 interface HandlerResult {
   ok: boolean;
   reason?: string;
@@ -54,7 +61,10 @@ interface HandlerResult {
 // `.uncanceled` all funnel through here. `.canceled` and `.revoked`
 // route through `applyTerminalCancel` instead because they set
 // canceled_at and flip tier to 'free' regardless of status string.
-async function applySubscriptionState(data: PolarSubscriptionData): Promise<HandlerResult> {
+async function applySubscriptionState(
+  data: PolarSubscriptionData,
+  eventAt: Date,
+): Promise<HandlerResult> {
   const externalId = data.customer.externalId;
   if (!externalId) {
     console.warn(`[billing] event for ${data.id} has no externalCustomerId, skipping`);
@@ -72,11 +82,22 @@ async function applySubscriptionState(data: PolarSubscriptionData): Promise<Hand
       ? new Date(data.currentPeriodEnd)
       : data.currentPeriodEnd;
 
-  const now = new Date();
   const [existing] = await db
-    .select({ id: subscriptions.id })
+    .select({
+      id: subscriptions.id,
+      updatedAt: subscriptions.updatedAt,
+      canceledAt: subscriptions.canceledAt,
+    })
     .from(subscriptions)
     .where(eq(subscriptions.polarSubscriptionId, data.id));
+
+  // Deliveries can arrive late or be retried out of order. `updatedAt`
+  // holds the time of the newest event applied, so anything older, and
+  // anything for a subscription that has already ended, is dropped
+  // rather than allowed to hand the plan back.
+  if (existing && (existing.canceledAt || eventAt < existing.updatedAt)) {
+    return { ok: true, reason: "stale event ignored", subscriptionId: existing.id };
+  }
 
   let subscriptionId: string;
   if (existing) {
@@ -86,7 +107,7 @@ async function applySubscriptionState(data: PolarSubscriptionData): Promise<Hand
         status: data.status,
         currentPeriodEnd: periodEnd,
         cancelAtPeriodEnd: data.cancelAtPeriodEnd,
-        updatedAt: now,
+        updatedAt: eventAt,
       })
       .where(eq(subscriptions.id, existing.id));
     subscriptionId = existing.id;
@@ -99,8 +120,8 @@ async function applySubscriptionState(data: PolarSubscriptionData): Promise<Hand
       status: data.status,
       currentPeriodEnd: periodEnd,
       cancelAtPeriodEnd: data.cancelAtPeriodEnd,
-      createdAt: now,
-      updatedAt: now,
+      createdAt: eventAt,
+      updatedAt: eventAt,
     });
   }
 
@@ -370,7 +391,10 @@ export const billingRoutes = new Elysia({ prefix: "/api/billing" })
           case "subscription.updated":
           case "subscription.uncanceled":
           case "subscription.past_due":
-            result = await applySubscriptionState(event.data as unknown as PolarSubscriptionData);
+            result = await applySubscriptionState(
+              event.data as unknown as PolarSubscriptionData,
+              eventTime((event as { timestamp?: unknown }).timestamp),
+            );
             break;
           case "subscription.canceled":
           case "subscription.revoked":

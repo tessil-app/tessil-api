@@ -442,6 +442,66 @@ describe("POST /api/billing/webhook — retry after a failed delivery", () => {
   });
 });
 
+describe("POST /api/billing/webhook — stale events", () => {
+  const send = (payload: object, id: string) => {
+    const signed = signEvent(payload, id);
+    return app.handle(
+      new Request(`${APP_URL}/api/billing/webhook`, {
+        method: "POST",
+        headers: signed.headers,
+        body: signed.body,
+      }),
+    );
+  };
+
+  it("an old 'active' delivered after the cancel does not hand the plan back", async () => {
+    const { user } = await createAuthedUser();
+    const ids = { subscriptionId: "sub_stale", customerId: "cus_stale", externalId: user.id };
+    const t0 = new Date(Date.now() - 60_000).toISOString();
+    const t1 = new Date(Date.now() - 30_000).toISOString();
+
+    await send({ ...subscriptionCreatedPayload(ids), timestamp: t0 }, "msg_stale_created");
+    await send({ ...subscriptionCanceledPayload(ids), timestamp: t1 }, "msg_stale_canceled");
+
+    // Same moment as the original, arriving last.
+    const late = await send(
+      { ...subscriptionCreatedPayload(ids), type: "subscription.active", timestamp: t0 },
+      "msg_stale_late",
+    );
+    expect(late.status).toBe(200);
+
+    const [after] = await db.select().from(users).where(eq(users.id, user.id));
+    expect(after?.tier).toBe("free");
+    const [sub] = await db
+      .select()
+      .from(subscriptions)
+      .where(eq(subscriptions.polarSubscriptionId, "sub_stale"));
+    expect(sub?.status).toBe("canceled");
+  });
+
+  it("an older update does not overwrite a newer one", async () => {
+    const { user } = await createAuthedUser();
+    const ids = { subscriptionId: "sub_order", customerId: "cus_order", externalId: user.id };
+    const older = new Date(Date.now() - 60_000).toISOString();
+    const newer = new Date(Date.now() - 10_000).toISOString();
+
+    await send(
+      { ...subscriptionCreatedPayload({ ...ids, cancelAtPeriodEnd: true }), type: "subscription.updated", timestamp: newer },
+      "msg_order_new",
+    );
+    await send(
+      { ...subscriptionCreatedPayload({ ...ids, cancelAtPeriodEnd: false }), type: "subscription.updated", timestamp: older },
+      "msg_order_old",
+    );
+
+    const [sub] = await db
+      .select()
+      .from(subscriptions)
+      .where(eq(subscriptions.polarSubscriptionId, "sub_order"));
+    expect(sub?.cancelAtPeriodEnd).toBe(true);
+  });
+});
+
 // ─── Auth gates on checkout + portal ─────────────────────────────────────────
 
 describe("POST /api/billing/checkout — auth gate", () => {
