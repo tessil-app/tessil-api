@@ -12,7 +12,14 @@ import {
   rateLimiters,
   releaseAuthedOrIpVolumeLimit,
 } from '../services/ratelimit.service';
-import { resolveCaps } from '../config/tiers';
+import { env } from '../config/env';
+import { resolveTransferCaps } from '../config/tiers';
+import {
+  completeTransferWithPass,
+  hasOpenTransferSlot,
+  PassAlreadyUsedError,
+  resolvePass,
+} from '../services/pass.service';
 import { exceedsTotalLimit } from '../utils/limits';
 import { authPlugin } from '../auth/middleware';
 import { ipContextPlugin } from '../auth/ipContextPlugin';
@@ -53,7 +60,39 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
   // the transfer is owned by that user; otherwise it's anonymous
   // (user_id NULL). Ownership is set at creation and never re-assigned.
   .post('/create-transfer', async ({ body, ipContext, me, set }) => {
-    const caps = resolveCaps(me);
+    // Pay-to-send: a transfer needs an active subscription or a paid,
+    // unused pass. The pass is only spent when the transfer completes.
+    let passId: string | null = null;
+    if (env.PAYWALL_ENABLED && me?.tier !== 'pro') {
+      const paymentRequired = (code: string, error: string) => {
+        set.status = 402;
+        return { error, code, upgradeUrl: '/pricing' };
+      };
+      if (!body.passToken) {
+        return paymentRequired('payment_required', 'Sending needs a pass or a subscription.');
+      }
+      let resolved: Awaited<ReturnType<typeof resolvePass>>;
+      try {
+        resolved = await resolvePass(body.passToken);
+      } catch (err) {
+        console.error('[upload] pass verification failed:', err);
+        set.status = 502;
+        return { error: 'Could not confirm the payment. Please try again.' };
+      }
+      if (resolved.state === 'used') {
+        return paymentRequired('pass_already_used', 'This pass has already been used.');
+      }
+      if (resolved.state !== 'paid' || !resolved.pass) {
+        return paymentRequired('payment_required', 'This pass has not been paid for.');
+      }
+      if (!(await hasOpenTransferSlot(resolved.pass.id))) {
+        set.status = 429;
+        return { error: 'Too many unfinished transfers on this pass. Try again in a few minutes.' };
+      }
+      passId = resolved.pass.id;
+    }
+
+    const caps = resolveTransferCaps(me, passId !== null);
 
     // Per-minute smoothing rate (not tier-aware — applies the same to
     // every tier). Per-user when authed, per-IP otherwise.
@@ -115,6 +154,7 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       maxDownloads,
       me?.id ?? null,
       titleResult.value,
+      passId,
     );
 
     return {
@@ -128,6 +168,7 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       maxDownloads: t.Optional(t.Number({ minimum: 1, maximum: 100 })),
       encryptedTitle: t.Optional(t.String({ maxLength: ENCRYPTED_TITLE_MAX_LENGTH })),
       encryptedTitleIv: t.Optional(t.String({ maxLength: ENCRYPTED_TITLE_IV_LENGTH })),
+      passToken: t.Optional(t.String({ minLength: 16, maxLength: 64 })),
     })
   })
 
@@ -136,8 +177,6 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
   // per-Part round-trips. Monthly volume is charged here;
   // /abort-multipart releases it.
   .post('/init-multipart', async ({ body, ipContext, me, set }) => {
-    const caps = resolveCaps(me);
-
     const rateLimit = await checkAuthedOrIpRateLimit(me?.id, ipContext, rateLimiters.upload);
     if (!rateLimit.allowed) {
       set.status = 429;
@@ -164,6 +203,8 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       set.status = 404;
       return { error: 'Transfer not found or has expired' };
     }
+
+    const caps = resolveTransferCaps(me, transfer.passId !== null);
 
     // Tier-aware file size cap.
     if (size > caps.maxFileSize) {
@@ -418,7 +459,23 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       }
     }
 
-    await completeTransfer(transferId, vaultWrap);
+    if (transfer.passId) {
+      try {
+        await completeTransferWithPass(transferId, transfer.passId, vaultWrap);
+      } catch (err) {
+        if (err instanceof PassAlreadyUsedError) {
+          set.status = 402;
+          return {
+            error: 'This pass has already been used for another transfer.',
+            code: 'pass_already_used',
+            upgradeUrl: '/pricing',
+          };
+        }
+        throw err;
+      }
+    } else {
+      await completeTransfer(transferId, vaultWrap);
+    }
     logCompletedTransfer(transfer).catch(() => {}); // fire-and-forget, never blocks response
 
     return {

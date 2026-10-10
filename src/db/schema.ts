@@ -32,6 +32,10 @@ export const transfers = pgTable('transfers', {
   // See docs/adr/0005-encrypted-transfer-title-scope.md.
   encryptedTitle: varchar('encrypted_title', { length: 1024 }),
   encryptedTitleIv: varchar('encrypted_title_iv', { length: 32 }),
+  // Single-transfer pass paying for this upload. Set at creation and
+  // cleared when the transfer completes, so a finished transfer keeps
+  // no pointer to the payment behind it. No FK: the link is temporary.
+  passId: varchar('pass_id', { length: 21 }),
 }, (table) => ({
   // Dashboard list: filter by owner, ORDER BY created_at DESC. Postgres can
   // scan the index backwards, so an ascending createdAt covers the sort.
@@ -357,6 +361,28 @@ export const billingEvents = pgTable('billing_events', {
   subscriptionIdIdx: index('billing_events_subscription_id_idx').on(table.subscriptionId),
 }));
 
+// One-time passes for the pay-to-send experiment. The browser holds a
+// random token and we store only its SHA-256, so a database read does
+// not yield usable passes. `polarCheckoutId` lets us ask Polar whether
+// the checkout was paid; nothing here references the transfer it bought.
+export const transferPasses = pgTable('transfer_passes', {
+  id: varchar('id', { length: 21 }).primaryKey(), // nanoid
+  tokenHash: varchar('token_hash', { length: 64 }).notNull(),
+  polarCheckoutId: varchar('polar_checkout_id', { length: 64 }).notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  paidAt: timestamp('paid_at', { withTimezone: true }),
+  consumedAt: timestamp('consumed_at', { withTimezone: true }),
+}, (table) => ({
+  tokenHashUnique: uniqueIndex('transfer_passes_token_hash_unique').on(table.tokenHash),
+  polarCheckoutIdUnique: uniqueIndex('transfer_passes_polar_checkout_id_unique')
+    .on(table.polarCheckoutId),
+  // Sweep of checkouts that were opened and never paid.
+  unpaidIdx: index('transfer_passes_unpaid_idx')
+    .on(table.createdAt)
+    .where(sql`${table.paidAt} IS NULL`),
+}));
+
+export type TransferPass = typeof transferPasses.$inferSelect;
 export type Subscription = typeof subscriptions.$inferSelect;
 export type NewSubscription = typeof subscriptions.$inferInsert;
 export type BillingEvent = typeof billingEvents.$inferSelect;

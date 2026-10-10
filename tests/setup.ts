@@ -57,6 +57,10 @@ process.env.POLAR_WEBHOOK_SECRET = "whsec_dGVzdHdlYmhvb2tzZWNyZXQ";
 process.env.POLAR_ACCESS_TOKEN = process.env.POLAR_ACCESS_TOKEN ?? "polar_test_token";
 process.env.POLAR_PRODUCT_ID_MONTHLY = process.env.POLAR_PRODUCT_ID_MONTHLY ?? "prod_test_monthly";
 process.env.POLAR_PRODUCT_ID_ANNUAL = process.env.POLAR_PRODUCT_ID_ANNUAL ?? "prod_test_annual";
+process.env.POLAR_PRODUCT_ID_PASS = process.env.POLAR_PRODUCT_ID_PASS ?? "prod_test_pass";
+// The paywall is opt-in per test file (tests/integration/paywall.test.ts
+// flips env.PAYWALL_ENABLED); every other suite runs with it off.
+process.env.PAYWALL_ENABLED = "false";
 
 // Default mock: presigned-URL handouts succeed, deletes are no-ops, and
 // HeadObject pretends the upload landed at the size we have on the file

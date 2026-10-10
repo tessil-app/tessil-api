@@ -23,6 +23,7 @@ const TABLES_TO_TRUNCATE = [
   "files",
   "transfer_events",
   "transfers",
+  "transfer_passes",
   "sessions",
   "magic_link_tokens",
   "auth_events",

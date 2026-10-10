@@ -594,6 +594,11 @@ export const rateLimiters = {
   authRequestPerIp: { prefix: 'auth-request-ip', windowSeconds: HOUR_SECONDS, maxRequests: env.RATE_LIMIT_AUTH_REQUEST_PER_HOUR_PER_IP },
   authVerifyPerIp: { prefix: 'auth-verify-ip', windowSeconds: 60, maxRequests: env.RATE_LIMIT_AUTH_VERIFY_PER_MINUTE_PER_IP },
 
+  // Pass checkout opens a Polar session per call; status is polled by the
+  // buyer's tab while they pay.
+  passCheckout: { prefix: 'pass-checkout', windowSeconds: HOUR_SECONDS, maxRequests: 10 },
+  passStatus: { prefix: 'pass-status', windowSeconds: 60, maxRequests: 40 },
+
   // Per-user limits on /me/transfers
   meTransfersList: { prefix: 'me-transfers-list', windowSeconds: 60, maxRequests: 60 },
   meTransfersDelete: { prefix: 'me-transfers-delete', windowSeconds: 60, maxRequests: 10 },

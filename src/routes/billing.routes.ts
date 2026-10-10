@@ -7,14 +7,19 @@ import { Elysia, t } from "elysia";
 import { desc, eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { authPlugin } from "../auth/middleware";
+import { ipContextPlugin } from "../auth/ipContextPlugin";
+import { env } from "../config/env";
+import { paidCaps } from "../config/tiers";
 import { db } from "../db";
 import { billingEvents, subscriptions, users, type Subscription } from "../db/schema";
+import { createPass, resolvePass } from "../services/pass.service";
 import {
   createPortalSession,
   createProCheckout,
   parseWebhook,
   WebhookVerificationError,
 } from "../services/polar.service";
+import { checkIpRateLimit, rateLimiters } from "../services/ratelimit.service";
 
 // Polar `subscription.status` values that map to "user is currently
 // Pro". `canceled` is terminal; everything else keeps Pro caps.
@@ -163,6 +168,62 @@ async function applyTerminalCancel(data: PolarSubscriptionData): Promise<Handler
 
 export const billingRoutes = new Elysia({ prefix: "/api/billing" })
   .use(authPlugin)
+  .use(ipContextPlugin)
+
+  // What the upload page needs before it lets a sender start: is the
+  // paywall on, is this session already paid for, and what paying buys.
+  .get("/entitlement", ({ me }) => {
+    const caps = paidCaps();
+    return {
+      paywall: env.PAYWALL_ENABLED,
+      entitled: !env.PAYWALL_ENABLED || me?.tier === "pro",
+      paidCaps: {
+        maxTransferSize: caps.maxTransferSize,
+        allowedExpiryHours: caps.allowedExpiryHours,
+      },
+    };
+  })
+
+  // Open a checkout for one single-transfer pass. Public: the buyer may
+  // be anonymous. The token is returned once and only to this caller.
+  .post("/pass/checkout", async ({ ipContext, set }) => {
+    const limit = await checkIpRateLimit(ipContext, rateLimiters.passCheckout);
+    if (!limit.allowed) {
+      set.status = 429;
+      set.headers["Retry-After"] = String(limit.resetIn);
+      return { error: "Too many checkouts started. Try again later." };
+    }
+    try {
+      const { token, url } = await createPass();
+      return { token, url };
+    } catch (err) {
+      console.error("[billing] pass checkout creation failed:", err);
+      set.status = 500;
+      return { error: "Checkout creation failed. Please try again." };
+    }
+  })
+
+  // Polled by the buyer's tab while the Polar checkout is open.
+  .post(
+    "/pass/status",
+    async ({ body, ipContext, set }) => {
+      const limit = await checkIpRateLimit(ipContext, rateLimiters.passStatus);
+      if (!limit.allowed) {
+        set.status = 429;
+        set.headers["Retry-After"] = String(limit.resetIn);
+        return { error: "Rate limit exceeded. Try again later." };
+      }
+      try {
+        const { state } = await resolvePass(body.token);
+        return { state };
+      } catch (err) {
+        console.error("[billing] pass status check failed:", err);
+        set.status = 502;
+        return { error: "Could not confirm the payment yet. Please try again." };
+      }
+    },
+    { body: t.Object({ token: t.String({ minLength: 16, maxLength: 64 }) }) },
+  )
 
   // Subscription summary for the authenticated user. Returns the
   // live row when present, otherwise the most-recent terminal row

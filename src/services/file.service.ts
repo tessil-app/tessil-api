@@ -18,7 +18,8 @@ export async function createTransfer(
   password?: string,
   maxDownloads?: number,
   userId?: string | null,
-  title?: TransferTitleInput | null
+  title?: TransferTitleInput | null,
+  passId?: string | null
 ): Promise<Transfer> {
   const id = nanoid();
   const expiresAt = new Date();
@@ -36,6 +37,7 @@ export async function createTransfer(
     userId: userId ?? null,
     encryptedTitle: title?.encryptedTitle ?? null,
     encryptedTitleIv: title?.encryptedTitleIv ?? null,
+    passId: passId ?? null,
   }).returning();
 
   return transfer;

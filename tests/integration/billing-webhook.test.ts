@@ -48,6 +48,12 @@ mock.module("../../src/services/polar.service", () => ({
   cancelSubscriptionImmediately: async () => {
     throw new Error("cancelSubscriptionImmediately not exercised in webhook tests");
   },
+  createPassCheckout: async () => {
+    throw new Error("createPassCheckout not exercised in webhook tests");
+  },
+  isPassCheckoutPaid: async () => {
+    throw new Error("isPassCheckoutPaid not exercised in webhook tests");
+  },
 }));
 
 let app: ReturnType<typeof createApp>;

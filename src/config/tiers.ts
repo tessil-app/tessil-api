@@ -33,10 +33,6 @@ function freeCaps(): TierCaps {
   };
 }
 
-// Per-file is bounded by the browser JS-heap ceiling for the current
-// non-streaming AES-GCM encryption — ~1.5 GiB on Chrome desktop, lower
-// on Safari and mobile. The upload page surfaces an advisory when a
-// file approaches the per-browser threshold.
 const PRO_CAPS: TierCaps = {
   maxFileSize: 2 * GB,
   maxTransferSize: 2 * GB,
@@ -54,4 +50,21 @@ export function resolveCaps(user: { tier: string } | null | undefined): TierCaps
   if (!user) return ANONYMOUS_CAPS;
   if (user.tier === "pro") return PRO_CAPS;
   return freeCaps();
+}
+
+/**
+ * Caps for a transfer that may be riding on a single-transfer pass. A
+ * pass buys the paid per-transfer limits for that one transfer, whoever
+ * the sender is.
+ */
+export function resolveTransferCaps(
+  user: { tier: string } | null | undefined,
+  hasPass: boolean,
+): TierCaps {
+  return hasPass ? PRO_CAPS : resolveCaps(user);
+}
+
+/** The limits shown to a sender who has not paid yet. */
+export function paidCaps(): TierCaps {
+  return PRO_CAPS;
 }

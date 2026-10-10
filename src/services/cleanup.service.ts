@@ -3,6 +3,7 @@ import { getExpiredTransfers, getAbandonedTransfers, getSoftDeletedTransfers, de
 import { db } from '../db';
 import { authEvents, magicLinkTokens, sessions } from '../db/schema';
 import { rotateSalts } from './saltService';
+import { cleanupUnpaidPasses } from './pass.service';
 
 export async function cleanupExpiredTransfers(): Promise<number> {
   const expiredTransfers = await getExpiredTransfers();
@@ -130,6 +131,12 @@ export function startCleanupJob(): void {
       }
     } catch (err) {
       console.error('[cleanup] Auth purge failed:', err);
+    }
+    try {
+      const passes = await cleanupUnpaidPasses();
+      if (passes > 0) console.log(`[cleanup] Dropped ${passes} unpaid passes`);
+    } catch (err) {
+      console.error('[cleanup] Pass sweep failed:', err);
     }
     try {
       const salt = await rotateSalts();

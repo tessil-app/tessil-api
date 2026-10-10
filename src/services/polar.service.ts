@@ -47,7 +47,7 @@ export async function createProCheckout(
     );
   }
 
-  const successUrl = env.POLAR_SUCCESS_URL || `${env.APP_URL.replace(/\/$/, "")}/dashboard/settings/account?upgraded=1`;
+  const successUrl = env.POLAR_SUCCESS_URL || `${env.APP_URL.replace(/\/$/, "")}/thanks`;
 
   const checkout = await client().checkouts.create({
     products: [productId],
@@ -57,6 +57,27 @@ export async function createProCheckout(
   });
 
   return { url: checkout.url, checkoutId: checkout.id };
+}
+
+/**
+ * Create a checkout for the one-time single-transfer pass. No customer
+ * is attached: the buyer may be anonymous, and we never learn who paid.
+ */
+export async function createPassCheckout(): Promise<{ url: string; checkoutId: string }> {
+  if (!env.POLAR_PRODUCT_ID_PASS) {
+    throw new Error("POLAR_PRODUCT_ID_PASS is not set. Passes cannot be checked out.");
+  }
+  const checkout = await client().checkouts.create({
+    products: [env.POLAR_PRODUCT_ID_PASS],
+    successUrl: `${env.APP_URL.replace(/\/$/, "")}/thanks`,
+  });
+  return { url: checkout.url, checkoutId: checkout.id };
+}
+
+/** True once Polar reports the pass checkout as paid. */
+export async function isPassCheckoutPaid(checkoutId: string): Promise<boolean> {
+  const checkout = await client().checkouts.get({ id: checkoutId });
+  return checkout.status === "succeeded" && checkout.productId === env.POLAR_PRODUCT_ID_PASS;
 }
 
 /**

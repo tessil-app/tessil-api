@@ -141,6 +141,11 @@ export const env = {
   POLAR_WEBHOOK_SECRET: process.env.POLAR_WEBHOOK_SECRET ?? "",
   POLAR_PRODUCT_ID_MONTHLY: process.env.POLAR_PRODUCT_ID_MONTHLY ?? "",
   POLAR_PRODUCT_ID_ANNUAL: process.env.POLAR_PRODUCT_ID_ANNUAL ?? "",
+  // One-time product behind the single-transfer pass.
+  POLAR_PRODUCT_ID_PASS: process.env.POLAR_PRODUCT_ID_PASS ?? "",
+  // Kill switch for the pay-to-send experiment. Off means every tier
+  // behaves as before and pass tokens are ignored.
+  PAYWALL_ENABLED: (process.env.PAYWALL_ENABLED ?? "false") === "true",
   POLAR_SUCCESS_URL: process.env.POLAR_SUCCESS_URL ?? "",
 
   NODE_ENV,
@@ -161,6 +166,20 @@ if (IS_PRODUCTION) {
       `Production env misconfigured. Required for auth: ${missing.join(", ")}. ` +
         `In dev (NODE_ENV != production), these can be left unset and email is logged to stdout.`,
     );
+  }
+
+  // A paywall that cannot take payment locks every sender out.
+  if (env.PAYWALL_ENABLED) {
+    const missingBilling: string[] = [];
+    if (!env.POLAR_ACCESS_TOKEN) missingBilling.push("POLAR_ACCESS_TOKEN");
+    if (!env.POLAR_WEBHOOK_SECRET) missingBilling.push("POLAR_WEBHOOK_SECRET");
+    if (!env.POLAR_PRODUCT_ID_MONTHLY) missingBilling.push("POLAR_PRODUCT_ID_MONTHLY");
+    if (!env.POLAR_PRODUCT_ID_PASS) missingBilling.push("POLAR_PRODUCT_ID_PASS");
+    if (missingBilling.length > 0) {
+      throw new Error(
+        `PAYWALL_ENABLED=true but billing is not configured: ${missingBilling.join(", ")}.`,
+      );
+    }
   }
 
   // CORS `*` + credentials reflects the request origin, making
