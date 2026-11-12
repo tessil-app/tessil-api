@@ -5,6 +5,11 @@
 //   PATCH  /api/portals/:id          (auth, owner) disable/enable, replace the public bundle
 //   DELETE /api/portals/:id          (auth, owner)
 //   GET    /api/portals/:id/public   (anyone) what a depositor needs
+//   POST   /api/portals/:id/deposits (anyone) start a deposit; files then go
+//                                    through the ordinary upload routes
+//   GET    /api/portals/:id/deposits (auth, member) list deposits
+//   GET    /api/portals/:id/deposits/files/:fileId/url   (auth, member)
+//   DELETE /api/portals/:id/deposits/:transferId         (auth, member)
 //
 // Every blob here is encrypted in the browser. The server checks sizes
 // and ownership and nothing else.
@@ -14,15 +19,30 @@ import { authPlugin } from "../auth/middleware";
 import { ipContextPlugin } from "../auth/ipContextPlugin";
 import { logAuthEvent } from "../auth/events";
 import { findUserById } from "../auth/users";
+import {
+  createDeposit,
+  getDepositFile,
+  listDeposits,
+  softDeleteDeposit,
+} from "../services/file.service";
+import { getPresignedDownloadUrl } from "../services/r2.service";
+import {
+  ENCRYPTED_TITLE_IV_LENGTH,
+  ENCRYPTED_TITLE_MAX_LENGTH,
+  validateEncryptedTitle,
+} from "../utils/encryptedTitle";
 import { resolveCaps } from "../config/tiers";
 import { checkIpRateLimit, checkRateLimit, rateLimiters } from "../services/ratelimit.service";
 import {
+  DEPOSIT_TOKEN_BYTES,
   PUBLIC_BUNDLE_MAX_BYTES,
   PUBLIC_BUNDLE_MIN_BYTES,
   SEALED_KEYS_MAX_BYTES,
   SEALED_KEYS_MIN_BYTES,
   createPortal,
   deleteOwnedPortal,
+  depositTokenMatches,
+  getMemberRole,
   getPortal,
   listPortalsForMember,
   updateOwnedPortal,
@@ -39,6 +59,7 @@ function decodeBounded(input: string, min: number, max: number): Uint8Array | nu
 const b64 = (bytes: Uint8Array) => Buffer.from(bytes).toString("base64url");
 
 const NOT_FOUND = { error: "Portal not found" };
+const DEPOSIT_PAGE_SIZE = 30;
 
 export const portalRoutes = new Elysia({ prefix: "/api/portals" })
   .use(authPlugin)
@@ -80,7 +101,8 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
 
       const publicBundle = decodeBounded(body.publicBundle, PUBLIC_BUNDLE_MIN_BYTES, PUBLIC_BUNDLE_MAX_BYTES);
       const sealedKeys = decodeBounded(body.sealedKeys, SEALED_KEYS_MIN_BYTES, SEALED_KEYS_MAX_BYTES);
-      if (!publicBundle || !sealedKeys || !NANOID_PATTERN.test(body.id)) {
+      const depositToken = decodeBounded(body.depositToken, DEPOSIT_TOKEN_BYTES, DEPOSIT_TOKEN_BYTES);
+      if (!publicBundle || !sealedKeys || !depositToken || !NANOID_PATTERN.test(body.id)) {
         set.status = 400;
         return { error: "Malformed portal payload." };
       }
@@ -89,6 +111,7 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
         id: body.id,
         publicBundle,
         sealedKeys,
+        depositToken,
       });
       if (!result.ok) {
         set.status = 409;
@@ -118,6 +141,7 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
         id: t.String({ minLength: 21, maxLength: 21 }),
         publicBundle: t.String({ maxLength: 4096 }),
         sealedKeys: t.String({ maxLength: 2048 }),
+        depositToken: t.String({ maxLength: 64 }),
       }),
     },
   )
@@ -264,4 +288,184 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
       };
     },
     { params: t.Object({ id: t.String() }) },
+  )
+
+  // Start a deposit. Returns a transfer ID; the depositor's browser then
+  // uploads through the ordinary upload routes and completes with the
+  // deposit's key sealed to the portal's public key.
+  .post(
+    "/:id/deposits",
+    async ({ params, body, ipContext, originRejected, set }) => {
+      if (originRejected) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
+      if (!NANOID_PATTERN.test(params.id)) {
+        set.status = 404;
+        return NOT_FOUND;
+      }
+
+      const perSource = await checkIpRateLimit(ipContext, rateLimiters.portalDepositPerSource);
+      if (!perSource.allowed) {
+        set.status = 429;
+        set.headers["Retry-After"] = String(perSource.resetIn);
+        return { error: "Too many uploads from here. Try again later." };
+      }
+
+      // The token shows the caller holds the portal's link, not just its
+      // ID. A wrong token and an unknown portal look the same.
+      const token = decodeBounded(body.depositToken, DEPOSIT_TOKEN_BYTES, DEPOSIT_TOKEN_BYTES);
+      const portal = await getPortal(params.id);
+      if (!portal || !token || !depositTokenMatches(portal, token)) {
+        set.status = 404;
+        return NOT_FOUND;
+      }
+      const owner = await findUserById(portal.ownerId);
+      const ownerCaps = resolveCaps(owner && !owner.deletedAt ? owner : null);
+      if (portal.isDisabled || ownerCaps.maxPortals === 0 || ownerCaps.depositRetentionDays === null) {
+        set.status = 403;
+        return { error: "This portal is not accepting files right now.", code: "portal_not_accepting" };
+      }
+
+      const perPortal = await checkRateLimit(portal.id, rateLimiters.portalDepositPerPortal);
+      if (!perPortal.allowed) {
+        set.status = 429;
+        set.headers["Retry-After"] = String(perPortal.resetIn);
+        return { error: "This portal is receiving a lot of uploads. Try again later." };
+      }
+
+      const title = validateEncryptedTitle(body.encryptedTitle, body.encryptedTitleIv);
+      if (!title.ok) {
+        set.status = 400;
+        return { error: title.error };
+      }
+
+      const deposit = await createDeposit(portal.id, ownerCaps.depositRetentionDays, title.value);
+      set.status = 201;
+      return {
+        transferId: deposit.id,
+        expiresAt: deposit.expiresAt.toISOString(),
+        maxFileSize: ownerCaps.maxFileSize,
+        maxTotalSize: ownerCaps.maxTransferSize,
+      };
+    },
+    {
+      params: t.Object({ id: t.String() }),
+      body: t.Object({
+        depositToken: t.String({ maxLength: 64 }),
+        // An optional note from the depositor, encrypted under the deposit's key.
+        encryptedTitle: t.Optional(t.String({ maxLength: ENCRYPTED_TITLE_MAX_LENGTH })),
+        encryptedTitleIv: t.Optional(t.String({ maxLength: ENCRYPTED_TITLE_IV_LENGTH })),
+      }),
+    },
+  )
+
+  .get(
+    "/:id/deposits",
+    async ({ params, query, me, set }) => {
+      if (!me) {
+        set.status = 401;
+        return { error: "Not authenticated" };
+      }
+      // Not a member and no such portal look the same.
+      if (!NANOID_PATTERN.test(params.id) || !(await getMemberRole(params.id, me.id))) {
+        set.status = 404;
+        return NOT_FOUND;
+      }
+      const limit = await checkRateLimit(me.id, rateLimiters.portalMemberRead);
+      if (!limit.allowed) {
+        set.status = 429;
+        set.headers["Retry-After"] = String(limit.resetIn);
+        return { error: "Rate limit exceeded. Try again later." };
+      }
+
+      const cursor = query.cursor ? new Date(query.cursor) : null;
+      if (cursor && Number.isNaN(cursor.getTime())) {
+        set.status = 400;
+        return { error: "Invalid cursor." };
+      }
+      const deposits = await listDeposits(params.id, cursor, DEPOSIT_PAGE_SIZE);
+      return {
+        deposits: deposits.map((d) => ({
+          id: d.id,
+          createdAt: d.createdAt.toISOString(),
+          expiresAt: d.expiresAt.toISOString(),
+          sealedKey: b64(d.sealedKey),
+          encryptedTitle: d.encryptedTitle,
+          encryptedTitleIv: d.encryptedTitleIv,
+          files: d.files,
+        })),
+        nextCursor:
+          deposits.length === DEPOSIT_PAGE_SIZE
+            ? deposits[deposits.length - 1].createdAt.toISOString()
+            : null,
+      };
+    },
+    {
+      params: t.Object({ id: t.String() }),
+      query: t.Object({ cursor: t.Optional(t.String({ maxLength: 40 })) }),
+    },
+  )
+
+  .get(
+    "/:id/deposits/files/:fileId/url",
+    async ({ params, me, set }) => {
+      if (!me) {
+        set.status = 401;
+        return { error: "Not authenticated" };
+      }
+      if (
+        !NANOID_PATTERN.test(params.id) ||
+        !NANOID_PATTERN.test(params.fileId) ||
+        !(await getMemberRole(params.id, me.id))
+      ) {
+        set.status = 404;
+        return NOT_FOUND;
+      }
+      const limit = await checkRateLimit(me.id, rateLimiters.portalMemberRead);
+      if (!limit.allowed) {
+        set.status = 429;
+        set.headers["Retry-After"] = String(limit.resetIn);
+        return { error: "Rate limit exceeded. Try again later." };
+      }
+
+      const file = await getDepositFile(params.id, params.fileId);
+      if (!file) {
+        set.status = 404;
+        return { error: "File not found" };
+      }
+      const presigned = await getPresignedDownloadUrl(file.r2Key, file.expiresAt);
+      return {
+        downloadUrl: presigned.url,
+        expiresAt: presigned.expiresAt.toISOString(),
+        size: file.size,
+      };
+    },
+    { params: t.Object({ id: t.String(), fileId: t.String() }) },
+  )
+
+  .delete(
+    "/:id/deposits/:transferId",
+    async ({ params, me, originRejected, set }) => {
+      if (originRejected) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
+      if (!me) {
+        set.status = 401;
+        return { error: "Not authenticated" };
+      }
+      if (
+        !NANOID_PATTERN.test(params.id) ||
+        !NANOID_PATTERN.test(params.transferId) ||
+        !(await getMemberRole(params.id, me.id)) ||
+        !(await softDeleteDeposit(params.id, params.transferId))
+      ) {
+        set.status = 404;
+        return NOT_FOUND;
+      }
+      set.status = 204;
+      return null;
+    },
+    { params: t.Object({ id: t.String(), transferId: t.String() }) },
   );

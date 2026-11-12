@@ -1,5 +1,5 @@
 import { lt, or, and, isNotNull } from 'drizzle-orm';
-import { getExpiredTransfers, getAbandonedTransfers, getSoftDeletedTransfers, deleteExpiredTransfer, abortTransfer, purgeOwnerDeletedTransfer } from './file.service';
+import { getExpiredTransfers, getAbandonedTransfers, getSoftDeletedTransfers, deleteExpiredTransfer, abortTransfer, markOrphanedDepositsDeleted, purgeOwnerDeletedTransfer } from './file.service';
 import { db } from '../db';
 import { authEvents, magicLinkTokens, sessions } from '../db/schema';
 import { rotateSalts } from './saltService';
@@ -37,6 +37,7 @@ export async function cleanupAbandonedTransfers(): Promise<number> {
 // Owner-soft-deleted transfers (DELETE /api/me/transfers/:id). Reuse the
 // expired-deletion path: removes R2 objects and hard-deletes the row.
 export async function cleanupSoftDeletedTransfers(): Promise<number> {
+  await markOrphanedDepositsDeleted();
   const rows = await getSoftDeletedTransfers();
   let count = 0;
 

@@ -184,7 +184,8 @@ export const downloadRoutes = new Elysia({ prefix: '/api/download' })
     // under DOWNLOAD_TOKEN_SECRET, so it cannot be replayed across
     // transfers.
     const transferRow = await getTransferById(file.transferId);
-    if (!transferRow) {
+    // A deposit has no public download path, whoever knows its IDs.
+    if (!transferRow || transferRow.portalId !== null) {
       set.status = 404;
       return { error: 'Transfer has expired' };
     }

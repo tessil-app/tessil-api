@@ -1,9 +1,11 @@
 // Portals. The server stores opaque blobs and membership; all keys are
 // made and used in the browser. See docs/adr/0014-portal-keys-and-vault-items.md.
 
+import { createHash, timingSafeEqual } from "node:crypto";
 import { and, count, eq, sql } from "drizzle-orm";
 import { db } from "../db";
 import { portalMembers, portals, type Portal } from "../db/schema";
+import { softDeleteDepositsOf } from "./file.service";
 
 // nonce(12) + public key(65) + a short title + tag(16), with headroom.
 export const PUBLIC_BUNDLE_MIN_BYTES = 12 + 65 + 16;
@@ -11,6 +13,19 @@ export const PUBLIC_BUNDLE_MAX_BYTES = 2048;
 // version(1) + encapsulated key(65) + link key(32) + PKCS#8 key + tag(16).
 export const SEALED_KEYS_MIN_BYTES = 1 + 65 + 32 + 16;
 export const SEALED_KEYS_MAX_BYTES = 1024;
+
+export const DEPOSIT_TOKEN_BYTES = 32;
+
+function hashDepositToken(token: Uint8Array): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+/** True when `token` is the one this portal was created with. */
+export function depositTokenMatches(portal: Portal, token: Uint8Array): boolean {
+  const expected = Buffer.from(portal.depositTokenHash, "hex");
+  const actual = Buffer.from(hashDepositToken(token), "hex");
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
 
 export interface PortalForMember {
   id: string;
@@ -36,7 +51,7 @@ export async function countOwnedPortals(userId: string): Promise<number> {
 export async function createPortal(
   ownerId: string,
   maxPortals: number,
-  blobs: { id: string; publicBundle: Uint8Array; sealedKeys: Uint8Array },
+  blobs: { id: string; publicBundle: Uint8Array; sealedKeys: Uint8Array; depositToken: Uint8Array },
 ): Promise<{ ok: true; portal: Portal } | { ok: false; reason: "limit_reached" | "id_taken" }> {
   return db.transaction(async (tx) => {
     await tx.execute(
@@ -47,7 +62,12 @@ export async function createPortal(
 
     const [portal] = await tx
       .insert(portals)
-      .values({ id: blobs.id, ownerId, publicBundle: blobs.publicBundle })
+      .values({
+        id: blobs.id,
+        ownerId,
+        publicBundle: blobs.publicBundle,
+        depositTokenHash: hashDepositToken(blobs.depositToken),
+      })
       .onConflictDoNothing({ target: portals.id })
       .returning();
     if (!portal) return { ok: false as const, reason: "id_taken" as const };
@@ -99,11 +119,37 @@ export async function updateOwnedPortal(
   return updated.length > 0;
 }
 
-/** Owner-scoped delete; members go with it. False when not found or not theirs. */
+/**
+ * Owner-scoped delete; members go with it. Deposits are marked deleted in
+ * the same transaction so the sweep removes their storage; without that
+ * they would live on, unreadable, until they expired. False when not found
+ * or not theirs.
+ */
 export async function deleteOwnedPortal(ownerId: string, portalId: string): Promise<boolean> {
-  const deleted = await db
-    .delete(portals)
-    .where(and(eq(portals.id, portalId), eq(portals.ownerId, ownerId)))
-    .returning({ id: portals.id });
-  return deleted.length > 0;
+  return db.transaction(async (tx) => {
+    const [owned] = await tx
+      .select({ id: portals.id })
+      .from(portals)
+      .where(and(eq(portals.id, portalId), eq(portals.ownerId, ownerId)))
+      .for("update");
+    if (!owned) return false;
+    await softDeleteDepositsOf([portalId], tx);
+    await tx.delete(portals).where(eq(portals.id, portalId));
+    return true;
+  });
+}
+
+/** The user's role in a portal, or null when they are not a member. */
+export async function getMemberRole(portalId: string, userId: string): Promise<string | null> {
+  const [row] = await db
+    .select({ role: portalMembers.role })
+    .from(portalMembers)
+    .where(and(eq(portalMembers.portalId, portalId), eq(portalMembers.userId, userId)))
+    .limit(1);
+  return row?.role ?? null;
+}
+
+export async function listOwnedPortalIds(ownerId: string): Promise<string[]> {
+  const rows = await db.select({ id: portals.id }).from(portals).where(eq(portals.ownerId, ownerId));
+  return rows.map((r) => r.id);
 }
