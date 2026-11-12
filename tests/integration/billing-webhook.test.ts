@@ -18,6 +18,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from "bun
 import { eq } from "drizzle-orm";
 import { Webhook, WebhookVerificationError } from "standardwebhooks";
 import { createApp } from "../../src/app";
+import { env } from "../../src/config/env";
 import { db } from "../../src/db";
 import { billingEvents, subscriptions, users } from "../../src/db/schema";
 import { authedRequest, createAuthedUser } from "../helpers/auth";
@@ -330,6 +331,50 @@ describe("POST /api/billing/webhook: cancel at period end", () => {
     now = await state();
     expect(now.tier).toBe("free");
     expect(now.sub.canceledAt).not.toBeNull();
+  });
+});
+
+// ─── plan from product ───────────────────────────────────────────────────────
+
+describe("POST /api/billing/webhook: which plan a subscription buys", () => {
+  async function tierAfter(productId: string | undefined, subscriptionId: string) {
+    const { user } = await createAuthedUser();
+    const payload = subscriptionCreatedPayload({
+      subscriptionId,
+      customerId: `cus_${subscriptionId}`,
+      externalId: user.id,
+    });
+    const signed = signEvent(
+      { ...payload, data: { ...payload.data, productId } },
+      `msg_${subscriptionId}`,
+    );
+    const res = await app.handle(
+      new Request(`${APP_URL}/api/billing/webhook`, {
+        method: "POST",
+        headers: signed.headers,
+        body: signed.body,
+      }),
+    );
+    expect(res.status).toBe(200);
+    const [row] = await db.select().from(users).where(eq(users.id, user.id));
+    return row.tier;
+  }
+
+  it("puts the higher product on 'max' and anything else on 'pro'", async () => {
+    const before = env.POLAR_PRODUCT_ID_MAX_MONTHLY;
+    env.POLAR_PRODUCT_ID_MAX_MONTHLY = "prod_test_max";
+    try {
+      expect(await tierAfter("prod_test_max", "sub_plan_max")).toBe("max");
+      expect(await tierAfter("prod_test_monthly", "sub_plan_pro")).toBe("pro");
+      expect(await tierAfter(undefined, "sub_plan_none")).toBe("pro");
+    } finally {
+      env.POLAR_PRODUCT_ID_MAX_MONTHLY = before;
+    }
+  });
+
+  it("does not treat a missing product as the higher plan when none is configured", async () => {
+    expect(env.POLAR_PRODUCT_ID_MAX_MONTHLY).toBe("");
+    expect(await tierAfter("", "sub_plan_blank")).toBe("pro");
   });
 });
 

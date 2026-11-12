@@ -45,6 +45,14 @@ export const env = {
   RATE_LIMIT_DAILY_DOWNLOADS: parseInt(getEnv("RATE_LIMIT_DAILY_DOWNLOADS", "200"), 10),
   RATE_LIMIT_MONTHLY_UPLOAD_GB: parseInt(getEnv("RATE_LIMIT_MONTHLY_UPLOAD_GB", "2"), 10) * GB,
 
+  // Paid plans. The two differ only in storage and retention, and the
+  // numbers are set here so they can change without a code change.
+  PLAN_PAID_MAX_FILE_GB: parseInt(getEnv("PLAN_PAID_MAX_FILE_GB", "5"), 10) * GB,
+  PLAN_PRO_STORAGE_GB: parseInt(getEnv("PLAN_PRO_STORAGE_GB", "20"), 10) * GB,
+  PLAN_PRO_RETENTION_DAYS: parseInt(getEnv("PLAN_PRO_RETENTION_DAYS", "30"), 10),
+  PLAN_MAX_STORAGE_GB: parseInt(getEnv("PLAN_MAX_STORAGE_GB", "100"), 10) * GB,
+  PLAN_MAX_RETENTION_DAYS: parseInt(getEnv("PLAN_MAX_RETENTION_DAYS", "90"), 10),
+
   // Auth — magic-link primary. APP_URL is the public frontend origin
   // used to compose magic links and as the default base for WebAuthn
   // RP origin and the Polar checkout success URL.
@@ -141,6 +149,9 @@ export const env = {
   POLAR_WEBHOOK_SECRET: process.env.POLAR_WEBHOOK_SECRET ?? "",
   POLAR_PRODUCT_ID_MONTHLY: process.env.POLAR_PRODUCT_ID_MONTHLY ?? "",
   POLAR_PRODUCT_ID_ANNUAL: process.env.POLAR_PRODUCT_ID_ANNUAL ?? "",
+  // The higher plan. A subscription to either product puts the user on it.
+  POLAR_PRODUCT_ID_MAX_MONTHLY: process.env.POLAR_PRODUCT_ID_MAX_MONTHLY ?? "",
+  POLAR_PRODUCT_ID_MAX_ANNUAL: process.env.POLAR_PRODUCT_ID_MAX_ANNUAL ?? "",
   POLAR_SUCCESS_URL: process.env.POLAR_SUCCESS_URL ?? "",
 
   NODE_ENV,

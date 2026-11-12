@@ -1,5 +1,5 @@
 import { Elysia, t } from 'elysia';
-import { createTransfer, completeTransfer, abortTransfer, logCompletedTransfer, createFile, deleteFileById, getFileById, getTransferTotalSize, getValidTransfer, getTransferById, getFilesByTransferId, removeStoredFiles, setFileUploadId } from '../services/file.service';
+import { createTransfer, completeTransfer, abortTransfer, logCompletedTransfer, createFile, createFileWithinQuota, deleteFileById, getFileById, getTransferTotalSize, getValidTransfer, getTransferById, getFilesByTransferId, removeStoredFiles, setFileUploadId } from '../services/file.service';
 import {
   completeMultipartUpload,
   headObject,
@@ -221,15 +221,29 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
     }
 
     // Persist the file row before talking to R2 so we can clean it up
-    // if the multipart init fails.
-    const file = await createFile({
+    // if the multipart init fails. On a plan with a storage quota the
+    // row is only created if the file fits.
+    const fileData = {
       transferId,
       encryptedName,
       encryptedNameIv,
       fileIv,
       size,
       mimeType: contentType || 'application/octet-stream',
-    });
+    };
+    const file =
+      me && transfer.userId === me.id && caps.storageBytes !== null
+        ? await createFileWithinQuota(me.id, caps.storageBytes, fileData)
+        : await createFile(fileData);
+    if (!file) {
+      await releaseAuthedOrIpVolumeLimit(me?.id, ipContext, volumeConfig, size);
+      set.status = 413;
+      return {
+        error: 'Your storage is full. Delete a transfer or wait for one to expire.',
+        code: 'storage_quota_exceeded',
+        upgradeUrl: '/pricing',
+      };
+    }
 
     try {
       const { uploadId, partUrls } = await initMultipartUpload(file.r2Key, size);
