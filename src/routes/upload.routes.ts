@@ -148,8 +148,6 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
   // per-Part round-trips. Monthly volume is charged here;
   // /abort-multipart releases it.
   .post('/init-multipart', async ({ body, ipContext, me, set }) => {
-    const caps = resolveCaps(me);
-
     const rateLimit = await checkAuthedOrIpRateLimit(me?.id, ipContext, rateLimiters.upload);
     if (!rateLimit.allowed) {
       set.status = 429;
@@ -181,6 +179,13 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       return { error: 'Transfer is already completed' };
     }
 
+    // Limits follow the transfer's owner, not whoever is calling. A
+    // signed-in user adding to an ownerless transfer gets anonymous
+    // limits, or a paid plan's size caps would apply to bytes that no
+    // account's storage quota accounts for.
+    const owner = transfer.userId === null ? null : me;
+    const caps = resolveCaps(owner);
+
     // Tier-aware file size cap.
     if (size > caps.maxFileSize) {
       set.status = 400;
@@ -209,7 +214,7 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       maxBytes: caps.monthlyVolumeBytes,
       increment: size,
     };
-    const volumeLimit = await checkAuthedOrIpVolumeLimit(me?.id, ipContext, volumeConfig);
+    const volumeLimit = await checkAuthedOrIpVolumeLimit(owner?.id, ipContext, volumeConfig);
     if (!volumeLimit.allowed) {
       set.status = 429;
       set.headers['Retry-After'] = String(volumeLimit.resetIn);
@@ -232,11 +237,11 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       mimeType: contentType || 'application/octet-stream',
     };
     const file =
-      me && transfer.userId === me.id && caps.storageBytes !== null
-        ? await createFileWithinQuota(me.id, caps.storageBytes, fileData)
+      owner && caps.storageBytes !== null
+        ? await createFileWithinQuota(owner.id, caps.storageBytes, fileData)
         : await createFile(fileData);
     if (!file) {
-      await releaseAuthedOrIpVolumeLimit(me?.id, ipContext, volumeConfig, size);
+      await releaseAuthedOrIpVolumeLimit(owner?.id, ipContext, volumeConfig, size);
       set.status = 413;
       return {
         error: 'Your storage is full. Delete a transfer or wait for one to expire.',
@@ -259,7 +264,7 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       // (Caller would otherwise have nothing to abort against.)
       console.error('[upload] initMultipartUpload failed:', err);
       await deleteFileById(file.id);
-      await releaseAuthedOrIpVolumeLimit(me?.id, ipContext, volumeConfig, size);
+      await releaseAuthedOrIpVolumeLimit(owner?.id, ipContext, volumeConfig, size);
       set.status = 502;
       return { error: 'Storage initialisation failed. Please try again.' };
     }
@@ -383,7 +388,12 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       maxBytes: 0, // unused on release
       increment: 0,
     };
-    await releaseAuthedOrIpVolumeLimit(me?.id, ipContext, volumeConfig, file.size);
+    await releaseAuthedOrIpVolumeLimit(
+      transfer.userId === null ? undefined : me?.id,
+      ipContext,
+      volumeConfig,
+      file.size,
+    );
 
     await deleteFileById(file.id);
 

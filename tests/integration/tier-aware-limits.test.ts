@@ -334,6 +334,19 @@ describe("storage quota", () => {
     expect((await addFile(cookie, transferId, 5 * GB)).status).toBe(200);
   });
 
+  // An ownerless transfer is not in anyone's quota, so it must not get
+  // a paid plan's size caps just because a paying user is signed in.
+  it("gives a paying user anonymous limits on an ownerless transfer", async () => {
+    const { cookie } = await paidUser();
+    const anonymous = await createTransfer(1);
+
+    const tooBig = await addFile(cookie, anonymous.id, 1 * GB);
+    expect(tooBig.status).toBe(400);
+    expect(((await tooBig.json()) as { code: string }).code).toBe("file_too_large");
+
+    expect((await addFile(cookie, anonymous.id, 1024)).status).toBe(200);
+  });
+
   it("does not apply to free accounts", async () => {
     const { cookie } = await createAuthedUser();
     const transferId = await newTransfer(cookie);
