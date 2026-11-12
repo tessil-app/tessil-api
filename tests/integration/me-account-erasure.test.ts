@@ -13,9 +13,12 @@ import {
   authEvents,
   magicLinkTokens,
   sessions,
+  subscriptions,
   transfers,
   users,
 } from "../../src/db/schema";
+import { eraseAccount } from "../../src/auth/users";
+import { nanoid } from "nanoid";
 import { createSession, SESSION_COOKIE_NAME } from "../../src/auth/sessions";
 import { issueMagicLink } from "../../src/auth/magicLinks";
 import { logAuthEvent } from "../../src/auth/events";
@@ -268,6 +271,95 @@ describe("DELETE /api/me — partial R2 failure does not block erasure", () => {
 
     // Restore the default benign R2 stub for the rest of the suite.
     mock.module("../../src/services/r2.service", () => defaultR2Mock());
+  });
+});
+
+// ─── 6b. Transfers the purge cannot remove ─────────────────────────────────
+
+describe("eraseAccount: leftovers and billing", () => {
+  it("erases an account that has a soft-deleted transfer awaiting the sweep", async () => {
+    const { user, cookie } = await createAuthedUser();
+    const owned = await createTransfer(1, undefined, undefined, user.id);
+    await seedFile(owned.id, 100);
+    await db.update(transfers).set({ isDeleted: true }).where(eq(transfers.id, owned.id));
+
+    const res = await app.handle(
+      new Request(`${APP_URL}/api/me`, deleteAccountInit({ confirmEmail: user.email }, cookie)),
+    );
+    expect(res.status).toBe(204);
+    expect(await db.select().from(users).where(eq(users.id, user.id))).toHaveLength(0);
+    expect(await db.select().from(transfers).where(eq(transfers.id, owned.id))).toHaveLength(0);
+  });
+
+  it("hands a transfer storage would not release to the sweep, detached from the user", async () => {
+    mock.module("../../src/services/r2.service", () => ({
+      ...defaultR2Mock(),
+      deleteFromR2: async () => {
+        throw new Error("simulated R2 failure");
+      },
+    }));
+
+    const user = await createTestUser();
+    const owned = await createTransfer(1, "a-password", undefined, user.id);
+    await seedFile(owned.id, 100);
+
+    await eraseAccount({ user, ipContext: testIpContext(), userAgent: null });
+    mock.module("../../src/services/r2.service", () => defaultR2Mock());
+
+    expect(await db.select().from(users).where(eq(users.id, user.id))).toHaveLength(0);
+    const [left] = await db.select().from(transfers).where(eq(transfers.id, owned.id));
+    expect(left.userId).toBeNull();
+    expect(left.isDeleted).toBe(true);
+    expect(left.passwordHash).toBeNull();
+  });
+
+  it("cancels a live subscription before erasing", async () => {
+    const user = await createTestUser();
+    await db.insert(subscriptions).values({
+      id: nanoid(),
+      userId: user.id,
+      polarSubscriptionId: "sub_live",
+      status: "active",
+      currentPeriodEnd: new Date(Date.now() + 86_400_000),
+    });
+
+    const cancelled: string[] = [];
+    await eraseAccount({
+      user,
+      ipContext: testIpContext(),
+      userAgent: null,
+      cancelSubscription: async (id) => {
+        cancelled.push(id);
+      },
+    });
+
+    expect(cancelled).toEqual(["sub_live"]);
+    expect(await db.select().from(users).where(eq(users.id, user.id))).toHaveLength(0);
+  });
+
+  it("leaves the account intact when the subscription cannot be cancelled", async () => {
+    const user = await createTestUser();
+    const owned = await createTransfer(1, undefined, undefined, user.id);
+    await db.insert(subscriptions).values({
+      id: nanoid(),
+      userId: user.id,
+      polarSubscriptionId: "sub_stuck",
+      status: "active",
+      currentPeriodEnd: new Date(Date.now() + 86_400_000),
+    });
+
+    const attempt = eraseAccount({
+      user,
+      ipContext: testIpContext(),
+      userAgent: null,
+      cancelSubscription: async () => {
+        throw new Error("simulated processor outage");
+      },
+    });
+    await expect(attempt).rejects.toThrow("simulated processor outage");
+
+    expect(await db.select().from(users).where(eq(users.id, user.id))).toHaveLength(1);
+    expect(await db.select().from(transfers).where(eq(transfers.id, owned.id))).toHaveLength(1);
   });
 });
 
