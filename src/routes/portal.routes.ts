@@ -285,6 +285,9 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
         publicBundle: b64(portal.publicBundle),
         keyVersion: portal.keyVersion,
         accepting,
+        // So the deposit page can say what fits before anything is uploaded.
+        maxFileSize: ownerCaps.maxFileSize,
+        maxTotalSize: ownerCaps.maxTransferSize,
       };
     },
     { params: t.Object({ id: t.String() }) },
