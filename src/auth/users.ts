@@ -118,6 +118,7 @@ export async function eraseAccount({
         encryptedTitle: null,
         encryptedTitleIv: null,
         passwordHash: null,
+        passwordSalt: null,
       })
       .where(eq(transfers.userId, user.id));
 

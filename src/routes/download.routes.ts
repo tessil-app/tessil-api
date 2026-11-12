@@ -48,6 +48,8 @@ export const downloadRoutes = new Elysia({ prefix: '/api/download' })
         id: transfer.id,
         expiresAt: transfer.expiresAt,
         passwordRequired: true,
+        // NULL on older transfers: the client then sends the password itself.
+        passwordSalt: transfer.passwordSalt,
         fileCount: files.length,
         encryptedTitle: transfer.encryptedTitle,
         encryptedTitleIv: transfer.encryptedTitleIv,

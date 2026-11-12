@@ -32,6 +32,7 @@ const MIN_PASSWORD_LENGTH = 8;
 // Vault wrap blob is `wrap_iv(12) || ciphertext(32) || tag(16)`.
 // Exact byte count enforced server-side so the column stays normalised.
 const WRAPPED_KEY_BYTES = 60;
+const PASSWORD_SALT_BYTES = 16;
 
 function decodeBase64Url(input: string): Uint8Array | null {
   // base64url uses '-_' and no padding; strict regex stops malformed payloads
@@ -76,7 +77,7 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       };
     }
 
-    const { expiresInHours, password, maxDownloads, encryptedTitle, encryptedTitleIv } = body;
+    const { expiresInHours, password, passwordSalt, maxDownloads, encryptedTitle, encryptedTitleIv } = body;
 
     // Validate expiration against the tier's allowed list.
     if (!caps.allowedExpiryHours.includes(expiresInHours)) {
@@ -92,6 +93,16 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
     if (password !== undefined && password.length < MIN_PASSWORD_LENGTH) {
       set.status = 400;
       return { error: `Password must be at least ${MIN_PASSWORD_LENGTH} characters.` };
+    }
+
+    // With a salt, `password` is a verifier the browser derived from the
+    // real password, which then never reaches us.
+    if (passwordSalt !== undefined) {
+      const saltBytes = decodeBase64Url(passwordSalt);
+      if (password === undefined || !saltBytes || saltBytes.length !== PASSWORD_SALT_BYTES) {
+        set.status = 400;
+        return { error: 'passwordSalt must be 16 bytes (base64url) and come with a password.' };
+      }
     }
 
     // Validate maxDownloads if provided
@@ -114,6 +125,7 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       maxDownloads,
       me?.id ?? null,
       titleResult.value,
+      passwordSalt,
     );
 
     return {
@@ -124,6 +136,7 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
     body: t.Object({
       expiresInHours: t.Number(),
       password: t.Optional(t.String({ maxLength: 256 })),
+      passwordSalt: t.Optional(t.String({ maxLength: 32 })),
       maxDownloads: t.Optional(t.Number({ minimum: 1, maximum: 100 })),
       encryptedTitle: t.Optional(t.String({ maxLength: ENCRYPTED_TITLE_MAX_LENGTH })),
       encryptedTitleIv: t.Optional(t.String({ maxLength: ENCRYPTED_TITLE_IV_LENGTH })),
