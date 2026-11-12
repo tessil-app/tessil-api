@@ -12,7 +12,8 @@
 
 import { and, eq, isNull } from "drizzle-orm";
 import { db } from "../db";
-import { users, userVaults, type UserVault } from "../db/schema";
+import { nanoid } from "nanoid";
+import { users, userVaults, vaultItems, type UserVault } from "../db/schema";
 
 export const WRAP_BYTES = 60;
 export const SALT_BYTES = 16;
@@ -128,4 +129,81 @@ export async function updateVaultPhraseWrap(
     .where(eq(userVaults.userId, userId))
     .returning({ userId: userVaults.userId });
   return result.length > 0;
+}
+
+// ─── user keypair ───────────────────────────────────────────────────────────
+
+export const PUBLIC_KEY_BYTES = 65; // uncompressed P-256 point
+export const USER_PRIVATE_KEY_KIND = "user_private_key";
+// version(1) + iv(12) + PKCS#8 P-256 key + tag(16) is about 170 bytes.
+export const WRAPPED_PRIVATE_KEY_MIN_BYTES = 64;
+export const WRAPPED_PRIVATE_KEY_MAX_BYTES = 512;
+
+/** True when the bytes are a point on P-256, not just the right length. */
+export async function isValidPublicKey(bytes: Uint8Array): Promise<boolean> {
+  if (bytes.length !== PUBLIC_KEY_BYTES || bytes[0] !== 0x04) return false;
+  try {
+    await crypto.subtle.importKey(
+      "raw",
+      bytes as unknown as ArrayBuffer,
+      { name: "ECDH", namedCurve: "P-256" },
+      false,
+      [],
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export interface UserKeypair {
+  publicKey: Uint8Array;
+  wrappedPrivateKey: Uint8Array;
+}
+
+export async function getUserKeypair(userId: string): Promise<UserKeypair | null> {
+  const [row] = await db
+    .select({ publicKey: users.publicKey, wrappedPrivateKey: vaultItems.ciphertext })
+    .from(users)
+    .innerJoin(
+      vaultItems,
+      and(eq(vaultItems.userId, users.id), eq(vaultItems.kind, USER_PRIVATE_KEY_KIND)),
+    )
+    .where(eq(users.id, userId))
+    .limit(1);
+  if (!row || !row.publicKey) return null;
+  return { publicKey: row.publicKey, wrappedPrivateKey: row.wrappedPrivateKey };
+}
+
+/**
+ * Stores a user's keypair once. Both halves land in one transaction, so a
+ * public key never exists without the private key that answers to it.
+ * Anything already encrypted to the key depends on it, so there is no
+ * overwrite: replacing a keypair will be an explicit rotation.
+ */
+export async function createUserKeypair(
+  userId: string,
+  keypair: UserKeypair,
+): Promise<{ ok: true } | { ok: false; reason: "no_vault" | "already_exists" }> {
+  if (!(await getUserVault(userId))) return { ok: false, reason: "no_vault" };
+
+  return db.transaction(async (tx) => {
+    const inserted = await tx
+      .insert(vaultItems)
+      .values({
+        id: nanoid(),
+        userId,
+        kind: USER_PRIVATE_KEY_KIND,
+        ciphertext: keypair.wrappedPrivateKey,
+      })
+      .onConflictDoNothing({ target: [vaultItems.userId, vaultItems.kind] })
+      .returning({ id: vaultItems.id });
+    if (inserted.length === 0) return { ok: false as const, reason: "already_exists" as const };
+
+    await tx
+      .update(users)
+      .set({ publicKey: keypair.publicKey })
+      .where(and(eq(users.id, userId), isNull(users.publicKey)));
+    return { ok: true as const };
+  });
 }
