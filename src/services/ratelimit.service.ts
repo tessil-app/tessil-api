@@ -618,6 +618,7 @@ export const rateLimiters = {
   // double-submits from the UI.
   // Portals. Writes are rare; the public read is hit once per visitor.
   portalWrite: { prefix: 'portal-write', windowSeconds: HOUR_SECONDS, maxRequests: 30 },
+  portalInvite: { prefix: 'portal-invite', windowSeconds: DAY_SECONDS, maxRequests: 20 },
   portalPublic: { prefix: 'portal-public', windowSeconds: 60, maxRequests: 30 },
   // Deposits come from anonymous outsiders, so they are limited per
   // source and per portal instead of by anyone's upload allowance.
