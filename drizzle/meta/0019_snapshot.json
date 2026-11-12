@@ -1,5 +1,5 @@
 {
-  "id": "58c366d5-e35b-4aec-9be0-2121d39968a5",
+  "id": "ffd479d7-32ce-49fe-ad46-7ec44f64ac38",
   "prevId": "bd67d809-56a0-4c59-baf2-980ad2dd074c",
   "version": "7",
   "dialect": "postgresql",
@@ -1563,7 +1563,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "user_vaults_password_pair_together": {
+          "name": "user_vaults_password_pair_together",
+          "value": "(\"user_vaults\".\"salt_password\" IS NULL) = (\"user_vaults\".\"wrap_password\" IS NULL)"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.users": {

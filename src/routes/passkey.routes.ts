@@ -14,6 +14,8 @@
 // re-mint anything (the user is already signed in via the existing session).
 
 import { Elysia, t } from "elysia";
+import { deletePasskeyKeepingVaultOpen } from "../services/vault.service";
+import { LAST_WAY_IN_MESSAGE } from "./vault.routes";
 import { authPlugin } from "../auth/middleware";
 import { ipContextPlugin } from "../auth/ipContextPlugin";
 import { logAuthEvent } from "../auth/events";
@@ -29,7 +31,6 @@ import {
 import {
   beginAuthentication,
   beginRegistration,
-  deleteAuthenticator,
   finishAuthentication,
   finishRegistration,
   listAuthenticatorsForUser,
@@ -303,11 +304,12 @@ export const passkeyRoutes = new Elysia({ prefix: "/api/auth" })
         return { error: "Not found" };
       }
 
-      const removed = await deleteAuthenticator({
-        authenticatorId: params.id,
-        userId: me.id,
-      });
-      if (!removed) {
+      const removed = await deletePasskeyKeepingVaultOpen(me.id, params.id);
+      if (!removed.ok && removed.reason === "last_way_in") {
+        set.status = 409;
+        return { error: LAST_WAY_IN_MESSAGE, code: "last_way_into_vault" };
+      }
+      if (!removed.ok) {
         set.status = 404;
         return { error: "Not found" };
       }

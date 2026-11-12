@@ -229,6 +229,66 @@ describe("setting up a vault without a password", () => {
     expect(s.passkeyWraps).toEqual([]);
   });
 
+  // Without a password, a passkey is the only thing besides the twelve
+  // words that opens the vault. The last one must not be removable.
+  it("refuses to remove the last passkey, as a wrap or as a sign-in key", async () => {
+    const { cookie, passkey } = await account(false);
+    await call(cookie, "POST", "/api/me/vault/setup", {
+      ...PHRASE,
+      passkey: { authenticatorId: passkey.id, prfSalt: SALT, wrap: WRAP },
+    });
+
+    const asWrap = await call(cookie, "DELETE", `/api/me/vault/passkeys/${passkey.id}`);
+    expect(asWrap.status).toBe(409);
+    expect(((await asWrap.json()) as { code: string }).code).toBe("last_way_into_vault");
+
+    const asKey = await call(cookie, "DELETE", `/api/auth/passkey/${passkey.id}`);
+    expect(asKey.status).toBe(409);
+    expect(await db.select().from(authenticators).where(eq(authenticators.id, passkey.id))).toHaveLength(1);
+    expect((await status(cookie)).passkeyWraps).toHaveLength(1);
+  });
+
+  it("allows it once there is a password or a second passkey", async () => {
+    const first = await account(false);
+    await call(first.cookie, "POST", "/api/me/vault/setup", {
+      ...PHRASE,
+      passkey: { authenticatorId: first.passkey.id, prfSalt: SALT, wrap: WRAP },
+    });
+    await call(first.cookie, "POST", "/api/me/vault/password", {
+      kdfVersion: 1,
+      saltPassword: b64(new Uint8Array(16).fill(7)),
+      wrapPassword: b64(new Uint8Array(60).fill(8)),
+    });
+    expect((await call(first.cookie, "DELETE", `/api/auth/passkey/${first.passkey.id}`)).status).toBe(200);
+
+    const second = await account(false);
+    await call(second.cookie, "POST", "/api/me/vault/setup", {
+      ...PHRASE,
+      passkey: { authenticatorId: second.passkey.id, prfSalt: SALT, wrap: WRAP },
+    });
+    const [other] = await db
+      .insert(authenticators)
+      .values({
+        id: nanoid(),
+        userId: second.user.id,
+        credentialId: crypto.getRandomValues(new Uint8Array(32)),
+        publicKey: new Uint8Array(77),
+        deviceType: "multiDevice",
+        backedUp: true,
+      })
+      .returning();
+    await call(second.cookie, "PUT", `/api/me/vault/passkeys/${other.id}`, { prfSalt: SALT, wrap: WRAP });
+    expect((await call(second.cookie, "DELETE", `/api/me/vault/passkeys/${second.passkey.id}`)).status).toBe(200);
+    // Now `other` is the last one.
+    expect((await call(second.cookie, "DELETE", `/api/auth/passkey/${other.id}`)).status).toBe(409);
+  });
+
+  it("never blocks removing a passkey from a vault that has a password", async () => {
+    const { cookie, passkey } = await account();
+    await call(cookie, "PUT", `/api/me/vault/passkeys/${passkey.id}`, { prfSalt: SALT, wrap: WRAP });
+    expect((await call(cookie, "DELETE", `/api/auth/passkey/${passkey.id}`)).status).toBe(200);
+  });
+
   it("lets a password be added later", async () => {
     const { cookie, passkey } = await account(false);
     await call(cookie, "POST", "/api/me/vault/setup", {

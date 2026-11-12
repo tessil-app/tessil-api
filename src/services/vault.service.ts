@@ -284,17 +284,72 @@ export async function setPasskeyWrap(
   return { ok: true };
 }
 
-/** True when a wrap was removed. */
-export async function deletePasskeyWrap(userId: string, authenticatorId: string): Promise<boolean> {
-  const deleted = await db
-    .delete(vaultPasskeyWraps)
-    .where(
-      and(
-        eq(vaultPasskeyWraps.authenticatorId, authenticatorId),
-        eq(vaultPasskeyWraps.userId, userId),
-      ),
-    )
-    .returning({ id: vaultPasskeyWraps.authenticatorId });
-  return deleted.length > 0;
+/**
+ * Whether taking this passkey away would leave the vault with nothing but
+ * its recovery phrase: no password, and no other passkey that unlocks it.
+ * Run inside `tx` with the vault row locked, so two removals at once
+ * cannot each believe the other passkey is still there.
+ */
+async function isLastWayIn(
+  tx: Parameters<Parameters<typeof db.transaction>[0]>[0],
+  userId: string,
+  authenticatorId: string,
+): Promise<boolean> {
+  const [vault] = await tx
+    .select({ wrapPassword: userVaults.wrapPassword })
+    .from(userVaults)
+    .where(eq(userVaults.userId, userId))
+    .for("update");
+  if (!vault || vault.wrapPassword !== null) return false;
+  const wraps = await tx
+    .select({ authenticatorId: vaultPasskeyWraps.authenticatorId })
+    .from(vaultPasskeyWraps)
+    .where(eq(vaultPasskeyWraps.userId, userId));
+  return wraps.length === 1 && wraps[0].authenticatorId === authenticatorId;
 }
 
+export type RemoveResult = { ok: true } | { ok: false; reason: "not_found" | "last_way_in" };
+
+/** Stops a passkey from unlocking the vault. */
+export async function deletePasskeyWrap(userId: string, authenticatorId: string): Promise<RemoveResult> {
+  return db.transaction(async (tx) => {
+    if (await isLastWayIn(tx, userId, authenticatorId)) {
+      return { ok: false as const, reason: "last_way_in" as const };
+    }
+    const deleted = await tx
+      .delete(vaultPasskeyWraps)
+      .where(
+        and(
+          eq(vaultPasskeyWraps.authenticatorId, authenticatorId),
+          eq(vaultPasskeyWraps.userId, userId),
+        ),
+      )
+      .returning({ id: vaultPasskeyWraps.authenticatorId });
+    return deleted.length > 0
+      ? { ok: true as const }
+      : { ok: false as const, reason: "not_found" as const };
+  });
+}
+
+/**
+ * Deletes one of the user's passkeys, unless it is the last thing besides
+ * the recovery phrase that opens their vault. Deleting a passkey takes its
+ * vault wrap with it, so the same rule applies as for removing the wrap.
+ */
+export async function deletePasskeyKeepingVaultOpen(
+  userId: string,
+  authenticatorId: string,
+): Promise<RemoveResult> {
+  return db.transaction(async (tx) => {
+    if (await isLastWayIn(tx, userId, authenticatorId)) {
+      return { ok: false as const, reason: "last_way_in" as const };
+    }
+    const deleted = await tx
+      .delete(authenticators)
+      .where(and(eq(authenticators.id, authenticatorId), eq(authenticators.userId, userId)))
+      .returning({ id: authenticators.id });
+    return deleted.length > 0
+      ? { ok: true as const }
+      : { ok: false as const, reason: "not_found" as const };
+  });
+}

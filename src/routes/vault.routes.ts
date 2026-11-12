@@ -36,6 +36,9 @@ import {
   updateVaultPhraseWrap,
 } from "../services/vault.service";
 
+export const LAST_WAY_IN_MESSAGE =
+  "This is the only thing besides your recovery phrase that opens your vault. Add a vault password or another passkey first.";
+
 function decodeBase64Url(input: string): Uint8Array | null {
   // Strict base64url — '-_' alphabet, no padding. Buffer's decoder is lenient
   // about garbage; we reject it up front so a malformed payload cannot reach
@@ -337,10 +340,14 @@ export const vaultRoutes = new Elysia({ prefix: "/api/me/vault" })
         set.status = 401;
         return { error: "Not authenticated" };
       }
-      if (
-        !/^[A-Za-z0-9_-]{21}$/.test(params.authenticatorId) ||
-        !(await deletePasskeyWrap(me.id, params.authenticatorId))
-      ) {
+      const removed = /^[A-Za-z0-9_-]{21}$/.test(params.authenticatorId)
+        ? await deletePasskeyWrap(me.id, params.authenticatorId)
+        : ({ ok: false, reason: "not_found" } as const);
+      if (!removed.ok && removed.reason === "last_way_in") {
+        set.status = 409;
+        return { error: LAST_WAY_IN_MESSAGE, code: "last_way_into_vault" };
+      }
+      if (!removed.ok) {
         set.status = 404;
         return { error: "Passkey not found." };
       }

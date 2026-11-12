@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { pgTable, varchar, bigint, timestamp, integer, boolean, serial, uniqueIndex, index, text, jsonb, customType } from 'drizzle-orm/pg-core';
+import { check, pgTable, varchar, bigint, timestamp, integer, boolean, serial, uniqueIndex, index, text, jsonb, customType } from 'drizzle-orm/pg-core';
 
 // Drizzle ORM ships a `bytea` type only via the experimental column builder
 // in some versions. customType is portable and lets us round-trip Uint8Array.
@@ -317,7 +317,12 @@ export const userVaults = pgTable('user_vaults', {
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   passwordChangedAt: timestamp('password_changed_at', { withTimezone: true }),
   phraseRegeneratedAt: timestamp('phrase_regenerated_at', { withTimezone: true }),
-});
+}, (table) => ({
+  passwordPairTogether: check(
+    'user_vaults_password_pair_together',
+    sql`(${table.saltPassword} IS NULL) = (${table.wrapPassword} IS NULL)`,
+  ),
+}));
 
 // Secrets a user keeps in their vault, encrypted in the browser under a
 // key derived from K_vault. The server stores and returns them and can
