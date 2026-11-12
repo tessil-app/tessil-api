@@ -80,20 +80,27 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
 
       const publicBundle = decodeBounded(body.publicBundle, PUBLIC_BUNDLE_MIN_BYTES, PUBLIC_BUNDLE_MAX_BYTES);
       const sealedKeys = decodeBounded(body.sealedKeys, SEALED_KEYS_MIN_BYTES, SEALED_KEYS_MAX_BYTES);
-      if (!publicBundle || !sealedKeys) {
+      if (!publicBundle || !sealedKeys || !NANOID_PATTERN.test(body.id)) {
         set.status = 400;
         return { error: "Malformed portal payload." };
       }
 
-      const portal = await createPortal(me.id, caps.maxPortals, { publicBundle, sealedKeys });
-      if (!portal) {
+      const result = await createPortal(me.id, caps.maxPortals, {
+        id: body.id,
+        publicBundle,
+        sealedKeys,
+      });
+      if (!result.ok) {
         set.status = 409;
-        return {
-          error: `Your plan includes ${caps.maxPortals} portals.`,
-          code: "portal_limit_reached",
-          upgradeUrl: "/pricing",
-        };
+        return result.reason === "limit_reached"
+          ? {
+              error: `Your plan includes ${caps.maxPortals} portals.`,
+              code: "portal_limit_reached",
+              upgradeUrl: "/pricing",
+            }
+          : { error: "That portal ID is taken. Try again.", code: "portal_id_taken" };
       }
+      const portal = result.portal;
 
       await logAuthEvent({
         eventType: "portal_created",
@@ -108,6 +115,7 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
     },
     {
       body: t.Object({
+        id: t.String({ minLength: 21, maxLength: 21 }),
         publicBundle: t.String({ maxLength: 4096 }),
         sealedKeys: t.String({ maxLength: 2048 }),
       }),

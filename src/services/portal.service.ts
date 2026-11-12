@@ -2,7 +2,6 @@
 // made and used in the browser. See docs/adr/0014-portal-keys-and-vault-items.md.
 
 import { and, count, eq, sql } from "drizzle-orm";
-import { nanoid } from "nanoid";
 import { db } from "../db";
 import { portalMembers, portals, type Portal } from "../db/schema";
 
@@ -29,26 +28,29 @@ export async function countOwnedPortals(userId: string): Promise<number> {
 }
 
 /**
- * Creates a portal with its owner as the first member. Returns null when
- * the owner already has `maxPortals`; the count and the insert share a
- * transaction and a per-owner lock so parallel creates cannot overshoot.
+ * Creates a portal with its owner as the first member. The ID is chosen by
+ * the browser, because the portal's keys are bound to it before the server
+ * ever sees them. The count and the insert share a transaction and a
+ * per-owner lock so parallel creates cannot overshoot the plan's limit.
  */
 export async function createPortal(
   ownerId: string,
   maxPortals: number,
-  blobs: { publicBundle: Uint8Array; sealedKeys: Uint8Array },
-): Promise<Portal | null> {
+  blobs: { id: string; publicBundle: Uint8Array; sealedKeys: Uint8Array },
+): Promise<{ ok: true; portal: Portal } | { ok: false; reason: "limit_reached" | "id_taken" }> {
   return db.transaction(async (tx) => {
     await tx.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(${`portals:${ownerId}`}, 0))`,
     );
     const [owned] = await tx.select({ n: count() }).from(portals).where(eq(portals.ownerId, ownerId));
-    if (Number(owned?.n ?? 0) >= maxPortals) return null;
+    if (Number(owned?.n ?? 0) >= maxPortals) return { ok: false as const, reason: "limit_reached" as const };
 
     const [portal] = await tx
       .insert(portals)
-      .values({ id: nanoid(), ownerId, publicBundle: blobs.publicBundle })
+      .values({ id: blobs.id, ownerId, publicBundle: blobs.publicBundle })
+      .onConflictDoNothing({ target: portals.id })
       .returning();
+    if (!portal) return { ok: false as const, reason: "id_taken" as const };
     await tx.insert(portalMembers).values({
       portalId: portal.id,
       userId: ownerId,
@@ -56,7 +58,7 @@ export async function createPortal(
       keyVersion: portal.keyVersion,
       sealedKeys: blobs.sealedKeys,
     });
-    return portal;
+    return { ok: true as const, portal };
   });
 }
 
