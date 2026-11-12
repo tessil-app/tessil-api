@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { pgTable, varchar, bigint, timestamp, integer, boolean, serial, uniqueIndex, index, text, jsonb, customType } from 'drizzle-orm/pg-core';
+import { type AnyPgColumn, pgTable, varchar, bigint, timestamp, integer, boolean, serial, uniqueIndex, index, text, jsonb, customType } from 'drizzle-orm/pg-core';
 
 // Drizzle ORM ships a `bytea` type only via the experimental column builder
 // in some versions. customType is portable and lets us round-trip Uint8Array.
@@ -36,7 +36,17 @@ export const transfers = pgTable('transfers', {
   // See docs/adr/0005-encrypted-transfer-title-scope.md.
   encryptedTitle: varchar('encrypted_title', { length: 1024 }),
   encryptedTitleIv: varchar('encrypted_title_iv', { length: 32 }),
+  // Set on a deposit: a transfer uploaded through a portal. A deposit has
+  // no owner (user_id NULL) and no share link; only the portal's members
+  // can list and download it.
+  portalId: varchar('portal_id', { length: 21 }).references((): AnyPgColumn => portals.id, { onDelete: 'set null' }),
+  // The deposit's key, sealed in the depositor's browser to the portal's
+  // public key. NULL on ordinary transfers.
+  sealedKey: bytea('sealed_key'),
 }, (table) => ({
+  portalIdx: index('transfers_portal_id_idx')
+    .on(table.portalId, table.createdAt)
+    .where(sql`${table.portalId} IS NOT NULL`),
   // Dashboard list: filter by owner, ORDER BY created_at DESC. Postgres can
   // scan the index backwards, so an ascending createdAt covers the sort.
   userIdIdx: index('transfers_user_id_idx')
@@ -335,6 +345,10 @@ export const portals = pgTable('portals', {
     .notNull()
     .references(() => users.id, { onDelete: 'cascade' }),
   publicBundle: bytea('public_bundle').notNull(),
+  // SHA-256 of a token derived from the link key. A depositor presents the
+  // token, which shows they hold the link and not just the portal's ID.
+  // Knowing the token or this hash does not reveal the link key.
+  depositTokenHash: varchar('deposit_token_hash', { length: 64 }).notNull(),
   // Bumped when the portal keypair is rotated.
   keyVersion: integer('key_version').default(1).notNull(),
   // Owner's switch to stop new deposits without deleting anything.

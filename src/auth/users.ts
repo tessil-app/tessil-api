@@ -17,7 +17,8 @@ import {
   type User,
 } from "../db/schema";
 import { normaliseEmail } from "./tokens";
-import { purgeOwnerDeletedTransfer } from "../services/file.service";
+import { purgeOwnerDeletedTransfer, softDeleteDepositsOf } from "../services/file.service";
+import { listOwnedPortalIds } from "../services/portal.service";
 import { getActiveSalt } from "../services/saltService";
 import type { IpContext } from "../utils/ipContext";
 
@@ -106,6 +107,10 @@ export async function eraseAccount({
 
   // Steps 3–9: DB-only cascade in a single transaction.
   await db.transaction(async (tx) => {
+    // Deposits in the user's portals have no owner of their own. Mark them
+    // deleted before the portals cascade away, so the sweep clears storage.
+    await softDeleteDepositsOf(await listOwnedPortalIds(user.id), tx);
+
     // Step 3: a transfer whose storage could not be cleared survives
     // step 2. Detach it from the user and strip what the user wrote,
     // so the account can go now and the sweep finishes the storage.

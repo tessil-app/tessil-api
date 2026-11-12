@@ -12,6 +12,9 @@ import {
   releaseAuthedOrIpVolumeLimit,
 } from '../services/ratelimit.service';
 import { resolveCaps } from '../config/tiers';
+import { findUserById } from '../auth/users';
+import { getPortal } from '../services/portal.service';
+import type { User } from '../db/schema';
 import { exceedsTotalLimit } from '../utils/limits';
 import { authPlugin } from '../auth/middleware';
 import { ipContextPlugin } from '../auth/ipContextPlugin';
@@ -33,6 +36,18 @@ const MIN_PASSWORD_LENGTH = 8;
 // Exact byte count enforced server-side so the column stays normalised.
 const WRAPPED_KEY_BYTES = 60;
 const PASSWORD_SALT_BYTES = 16;
+// mode(1) + encapsulated key(65) + key(32) + tag(16).
+const SEALED_KEY_BYTES = 114;
+
+// The account a deposit is stored for, or null when the portal is gone,
+// switched off, or its owner is no longer on a plan with portals.
+async function depositTarget(portalId: string): Promise<{ owner: User } | null> {
+  const portal = await getPortal(portalId);
+  if (!portal || portal.isDisabled) return null;
+  const owner = await findUserById(portal.ownerId);
+  if (!owner || owner.deletedAt || resolveCaps(owner).maxPortals === 0) return null;
+  return { owner };
+}
 
 function decodeBase64Url(input: string): Uint8Array | null {
   // base64url uses '-_' and no padding; strict regex stops malformed payloads
@@ -179,11 +194,16 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       return { error: 'Transfer is already completed' };
     }
 
-    // Limits follow the transfer's owner, not whoever is calling. A
-    // signed-in user adding to an ownerless transfer gets anonymous
-    // limits, or a paid plan's size caps would apply to bytes that no
-    // account's storage quota accounts for.
-    const owner = transfer.userId === null ? null : me;
+    // Limits follow whoever the bytes are stored for, not whoever is
+    // calling. A deposit counts against its portal's owner; an ownerless
+    // transfer gets anonymous limits even when a paying user is signed in,
+    // or paid size caps would apply to bytes no storage quota accounts for.
+    const deposit = transfer.portalId ? await depositTarget(transfer.portalId) : null;
+    if (transfer.portalId && !deposit) {
+      set.status = 403;
+      return { error: 'This portal is not accepting files right now.', code: 'portal_not_accepting' };
+    }
+    const owner = deposit ? deposit.owner : transfer.userId === null ? null : me;
     const caps = resolveCaps(owner);
 
     // Tier-aware file size cap.
@@ -214,7 +234,12 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       maxBytes: caps.monthlyVolumeBytes,
       increment: size,
     };
-    const volumeLimit = await checkAuthedOrIpVolumeLimit(owner?.id, ipContext, volumeConfig);
+    // A depositor is an outsider: their upload is bounded by the portal
+    // owner's storage and the deposit rate limits, not by a monthly
+    // allowance of their own or the owner's.
+    const volumeLimit = deposit
+      ? { allowed: true, remaining: 0, resetIn: 0 }
+      : await checkAuthedOrIpVolumeLimit(owner?.id, ipContext, volumeConfig);
     if (!volumeLimit.allowed) {
       set.status = 429;
       set.headers['Retry-After'] = String(volumeLimit.resetIn);
@@ -241,13 +266,15 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
         ? await createFileWithinQuota(owner.id, caps.storageBytes, fileData)
         : await createFile(fileData);
     if (!file) {
-      await releaseAuthedOrIpVolumeLimit(owner?.id, ipContext, volumeConfig, size);
+      if (!deposit) await releaseAuthedOrIpVolumeLimit(owner?.id, ipContext, volumeConfig, size);
       set.status = 413;
-      return {
-        error: 'Your storage is full. Delete a transfer or wait for one to expire.',
-        code: 'storage_quota_exceeded',
-        upgradeUrl: '/pricing',
-      };
+      return deposit
+        ? { error: 'This portal is full and cannot accept files right now.', code: 'portal_full' }
+        : {
+            error: 'Your storage is full. Delete a transfer or wait for one to expire.',
+            code: 'storage_quota_exceeded',
+            upgradeUrl: '/pricing',
+          };
     }
 
     try {
@@ -264,7 +291,7 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       // (Caller would otherwise have nothing to abort against.)
       console.error('[upload] initMultipartUpload failed:', err);
       await deleteFileById(file.id);
-      await releaseAuthedOrIpVolumeLimit(owner?.id, ipContext, volumeConfig, size);
+      if (!deposit) await releaseAuthedOrIpVolumeLimit(owner?.id, ipContext, volumeConfig, size);
       set.status = 502;
       return { error: 'Storage initialisation failed. Please try again.' };
     }
@@ -388,12 +415,14 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       maxBytes: 0, // unused on release
       increment: 0,
     };
-    await releaseAuthedOrIpVolumeLimit(
-      transfer.userId === null ? undefined : me?.id,
-      ipContext,
-      volumeConfig,
-      file.size,
-    );
+    if (!transfer.portalId) {
+      await releaseAuthedOrIpVolumeLimit(
+        transfer.userId === null ? undefined : me?.id,
+        ipContext,
+        volumeConfig,
+        file.size,
+      );
+    }
 
     await deleteFileById(file.id);
 
@@ -409,7 +438,7 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
 
   // Complete the transfer (called after all files are uploaded)
   .post('/complete', async ({ body, me, set }) => {
-    const { transferId, wrappedKey } = body;
+    const { transferId, wrappedKey, sealedKey } = body;
 
     // Validate transferId format
     if (!isValidNanoId(transferId)) {
@@ -438,7 +467,24 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
     // Vault wrap: K_transfer wrapped under the user's K_vault.
     // Anonymous transfers cannot vault; signed-in owners may. The wrap
     // blob is opaque to the server — only its byte count is validated.
-    let vaultWrap: { wrappedKey: Uint8Array } | undefined;
+    let vaultWrap: { wrappedKey?: Uint8Array; sealedKey?: Uint8Array } | undefined;
+
+    // A deposit carries its key sealed to the portal's public key, and
+    // nothing else can. Without it no member could ever open the files.
+    const hasSealedKey = typeof sealedKey === 'string' && sealedKey.length > 0;
+    if (hasSealedKey !== (transfer.portalId !== null)) {
+      set.status = 400;
+      return { error: 'sealedKey is required for a deposit and not allowed otherwise.' };
+    }
+    if (hasSealedKey) {
+      const sealedKeyBytes = decodeBase64Url(sealedKey!);
+      if (!sealedKeyBytes || sealedKeyBytes.length !== SEALED_KEY_BYTES) {
+        set.status = 400;
+        return { error: 'sealedKey must be 114 bytes (base64url).' };
+      }
+      vaultWrap = { sealedKey: sealedKeyBytes };
+    }
+
     if (typeof wrappedKey === 'string' && wrappedKey.length > 0) {
       if (!me || transfer.userId !== me.id) {
         set.status = 400;
@@ -490,6 +536,7 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
     body: t.Object({
       transferId: t.String({ minLength: 21, maxLength: 21 }),
       wrappedKey: t.Optional(t.String({ maxLength: 128 })),
+      sealedKey: t.Optional(t.String({ maxLength: 256 })),
     })
   })
 

@@ -1,7 +1,7 @@
-import { eq, and, gt, lt, desc, sql, notExists } from 'drizzle-orm';
+import { eq, and, or, gt, lt, desc, sql, notExists, inArray } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { db } from '../db';
-import { transfers, files, transferEvents, type NewTransfer, type NewFile, type Transfer, type File } from '../db/schema';
+import { transfers, files, portals, transferEvents, type NewTransfer, type NewFile, type Transfer, type File } from '../db/schema';
 
 // Optional encrypted-title pair carried alongside transfer creation.
 // Both fields are set together or not at all (server invariant — see
@@ -72,6 +72,25 @@ export async function setOwnedTransferTitle(
   return updated.length > 0;
 }
 
+// A deposit: a transfer uploaded through a portal. It has no owner, no
+// password and no download limit, and is kept for the portal owner's
+// retention period.
+export async function createDeposit(
+  portalId: string,
+  retentionDays: number,
+  title?: TransferTitleInput | null,
+): Promise<Transfer> {
+  const [transfer] = await db.insert(transfers).values({
+    id: nanoid(),
+    portalId,
+    expiresAt: new Date(Date.now() + retentionDays * 24 * 60 * 60 * 1000),
+    isCompleted: false,
+    encryptedTitle: title?.encryptedTitle ?? null,
+    encryptedTitleIv: title?.encryptedTitleIv ?? null,
+  }).returning();
+  return transfer;
+}
+
 // Marks the transfer live. Optional `vaultWrap` writes the per-transfer
 // vault column in the same UPDATE — caller has already validated the
 // blob layout (60 bytes). Anonymous and unvaulted callers leave it NULL.
@@ -80,14 +99,15 @@ export async function setOwnedTransferTitle(
 // set no longer matches `expectedFileCount` (the set the caller verified).
 export async function completeTransfer(
   id: string,
-  vaultWrap?: { wrappedKey: Uint8Array },
+  vaultWrap?: { wrappedKey?: Uint8Array; sealedKey?: Uint8Array },
   expectedFileCount?: number,
 ): Promise<boolean> {
   const updated = await db
     .update(transfers)
     .set({
       isCompleted: true,
-      ...(vaultWrap ? { wrappedKey: vaultWrap.wrappedKey } : {}),
+      ...(vaultWrap?.wrappedKey ? { wrappedKey: vaultWrap.wrappedKey } : {}),
+      ...(vaultWrap?.sealedKey ? { sealedKey: vaultWrap.sealedKey } : {}),
     })
     .where(
       and(
@@ -142,9 +162,11 @@ export async function getValidTransfer(id: string): Promise<Transfer | null> {
   return transfer;
 }
 
+// The public download path. A deposit is never served here: it has no
+// share link, and only the portal's members may read it.
 export async function getCompletedValidTransfer(id: string): Promise<Transfer | null> {
   const transfer = await getValidTransfer(id);
-  if (!transfer) return null;
+  if (!transfer || transfer.portalId !== null) return null;
 
   // Only expose completed transfers to downloaders
   if (!transfer.isCompleted) return null;
@@ -458,8 +480,9 @@ export async function createFile(data: Omit<NewFile, 'id' | 'r2Key' | 'storageTy
 }
 
 // Bytes an account has stored right now: every file of every transfer it
-// owns that has not been deleted, uploads in progress included. Computed
-// from the rows, so there is no separate counter to drift.
+// owns, and of every deposit in a portal it owns, that has not been
+// deleted. Uploads in progress are included. Computed from the rows, so
+// there is no separate counter to drift.
 type Queryable = Pick<typeof db, 'select'>;
 
 export async function getStoredBytes(userId: string, executor: Queryable = db): Promise<number> {
@@ -467,9 +490,10 @@ export async function getStoredBytes(userId: string, executor: Queryable = db): 
     .select({ total: sql<number>`coalesce(sum(${files.size}), 0)` })
     .from(files)
     .innerJoin(transfers, eq(transfers.id, files.transferId))
+    .leftJoin(portals, eq(portals.id, transfers.portalId))
     .where(
       and(
-        eq(transfers.userId, userId),
+        or(eq(transfers.userId, userId), eq(portals.ownerId, userId)),
         eq(transfers.isDeleted, false),
         eq(files.isDeleted, false),
       ),
@@ -607,4 +631,119 @@ export async function getFilesForTransfer(transferId: string): Promise<File[]> {
     .select()
     .from(files)
     .where(eq(files.transferId, transferId));
+}
+
+// ─── deposits, as a portal member sees them ─────────────────────────────────
+
+export interface DepositSummary {
+  id: string;
+  createdAt: Date;
+  expiresAt: Date;
+  sealedKey: Uint8Array;
+  encryptedTitle: string | null;
+  encryptedTitleIv: string | null;
+  files: {
+    id: string;
+    encryptedName: string;
+    encryptedNameIv: string;
+    fileIv: string;
+    size: number;
+    mimeType: string | null;
+  }[];
+}
+
+/** Completed, unexpired deposits of a portal, newest first. */
+export async function listDeposits(
+  portalId: string,
+  cursor: Date | null,
+  limit: number,
+): Promise<DepositSummary[]> {
+  const rows = await db
+    .select()
+    .from(transfers)
+    .where(
+      and(
+        eq(transfers.portalId, portalId),
+        eq(transfers.isDeleted, false),
+        eq(transfers.isCompleted, true),
+        gt(transfers.expiresAt, new Date()),
+        cursor ? lt(transfers.createdAt, cursor) : undefined,
+      ),
+    )
+    .orderBy(desc(transfers.createdAt))
+    .limit(limit);
+
+  const result: DepositSummary[] = [];
+  for (const row of rows) {
+    if (!row.sealedKey) continue;
+    const depositFiles = await getFilesByTransferId(row.id);
+    result.push({
+      id: row.id,
+      createdAt: row.createdAt,
+      expiresAt: row.expiresAt,
+      sealedKey: row.sealedKey,
+      encryptedTitle: row.encryptedTitle,
+      encryptedTitleIv: row.encryptedTitleIv,
+      files: depositFiles.map((f) => ({
+        id: f.id,
+        encryptedName: f.encryptedName,
+        encryptedNameIv: f.encryptedNameIv,
+        fileIv: f.fileIv,
+        size: Number(f.size),
+        mimeType: f.mimeType,
+      })),
+    });
+  }
+  return result;
+}
+
+/** A file of a live deposit in this portal, with the deposit's expiry; null otherwise. */
+export async function getDepositFile(
+  portalId: string,
+  fileId: string,
+): Promise<{ r2Key: string; size: number; expiresAt: Date } | null> {
+  const [row] = await db
+    .select({ r2Key: files.r2Key, size: files.size, expiresAt: transfers.expiresAt })
+    .from(files)
+    .innerJoin(transfers, eq(transfers.id, files.transferId))
+    .where(
+      and(
+        eq(files.id, fileId),
+        eq(files.isDeleted, false),
+        eq(transfers.portalId, portalId),
+        eq(transfers.isDeleted, false),
+        eq(transfers.isCompleted, true),
+        gt(transfers.expiresAt, new Date()),
+      ),
+    )
+    .limit(1);
+  return row ? { r2Key: row.r2Key, size: Number(row.size), expiresAt: row.expiresAt } : null;
+}
+
+/** Marks a deposit deleted; the sweep removes its storage. False when not in this portal. */
+export async function softDeleteDeposit(portalId: string, transferId: string): Promise<boolean> {
+  const updated = await db
+    .update(transfers)
+    .set({ isDeleted: true })
+    .where(
+      and(
+        eq(transfers.id, transferId),
+        eq(transfers.portalId, portalId),
+        eq(transfers.isDeleted, false),
+      ),
+    )
+    .returning({ id: transfers.id });
+  return updated.length > 0;
+}
+
+/** Marks every deposit of a portal deleted, before the portal row goes. */
+export async function softDeleteDepositsOf(
+  portalIds: string[],
+  executor: Pick<typeof db, 'update'> = db,
+): Promise<void> {
+  if (portalIds.length === 0) return;
+  await executor
+    .update(transfers)
+    .set({ isDeleted: true })
+    .where(inArray(transfers.portalId, portalIds));
 }

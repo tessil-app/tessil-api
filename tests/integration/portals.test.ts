@@ -30,6 +30,7 @@ const b64 = (bytes: Uint8Array) => Buffer.from(bytes).toString("base64url");
 const newId = () => nanoid();
 const BUNDLE = b64(new Uint8Array(140).fill(3));
 const SEALED = b64(new Uint8Array(260).fill(4));
+const TOKEN = b64(new Uint8Array(32).fill(6));
 
 async function account(tier: string, withKeypair = true) {
   const authed = await createAuthedUser();
@@ -49,7 +50,7 @@ function call(cookie: string | null, method: string, path: string, body?: object
 
 async function createOne(cookie: string): Promise<string> {
   const id = newId();
-  const res = await call(cookie, "POST", "", { id, publicBundle: BUNDLE, sealedKeys: SEALED });
+  const res = await call(cookie, "POST", "", { id, publicBundle: BUNDLE, sealedKeys: SEALED, depositToken: TOKEN });
   expect(res.status).toBe(201);
   expect(((await res.json()) as { id: string }).id).toBe(id);
   return id;
@@ -73,18 +74,20 @@ describe("creating a portal", () => {
     expect(body.maxPortals).toBe(3);
     expect(body.portals).toHaveLength(1);
     expect(body.portals[0]).toMatchObject({ id, role: "owner", publicBundle: BUNDLE, sealedKeys: SEALED });
+    // The token and its hash never come back out.
+    expect(JSON.stringify(body)).not.toContain(TOKEN);
   });
 
   it("is refused on the free plan", async () => {
     const { cookie } = await account("free");
-    const res = await call(cookie, "POST", "", { id: newId(), publicBundle: BUNDLE, sealedKeys: SEALED });
+    const res = await call(cookie, "POST", "", { id: newId(), publicBundle: BUNDLE, sealedKeys: SEALED, depositToken: TOKEN });
     expect(res.status).toBe(402);
     expect(((await res.json()) as { code: string }).code).toBe("portals_require_paid_plan");
   });
 
   it("needs the account to have a keypair", async () => {
     const { cookie } = await account("pro", false);
-    const res = await call(cookie, "POST", "", { id: newId(), publicBundle: BUNDLE, sealedKeys: SEALED });
+    const res = await call(cookie, "POST", "", { id: newId(), publicBundle: BUNDLE, sealedKeys: SEALED, depositToken: TOKEN });
     expect(res.status).toBe(409);
     expect(((await res.json()) as { code: string }).code).toBe("keypair_required");
   });
@@ -93,7 +96,7 @@ describe("creating a portal", () => {
     const { user, cookie } = await account("pro");
     const results = await Promise.all(
       Array.from({ length: 6 }, () =>
-        call(cookie, "POST", "", { id: newId(), publicBundle: BUNDLE, sealedKeys: SEALED }),
+        call(cookie, "POST", "", { id: newId(), publicBundle: BUNDLE, sealedKeys: SEALED, depositToken: TOKEN }),
       ),
     );
     expect(results.filter((r) => r.status === 201)).toHaveLength(3);
@@ -108,11 +111,12 @@ describe("creating a portal", () => {
 
   it("rejects blobs that are too small or too large", async () => {
     const { cookie } = await account("pro");
-    const tiny = await call(cookie, "POST", "", { publicBundle: b64(new Uint8Array(10)), sealedKeys: SEALED });
+    const tiny = await call(cookie, "POST", "", { id: newId(), publicBundle: b64(new Uint8Array(10)), sealedKeys: SEALED, depositToken: TOKEN });
     expect(tiny.status).toBe(400);
     const huge = await call(cookie, "POST", "", {
       publicBundle: BUNDLE,
       sealedKeys: b64(new Uint8Array(1500)),
+      depositToken: TOKEN,
     });
     expect(huge.status).toBe(400);
   });
@@ -122,7 +126,7 @@ describe("creating a portal", () => {
     const second = await account("pro");
     const id = await createOne(first.cookie);
 
-    const taken = await call(second.cookie, "POST", "", { id, publicBundle: BUNDLE, sealedKeys: SEALED });
+    const taken = await call(second.cookie, "POST", "", { id, publicBundle: BUNDLE, sealedKeys: SEALED, depositToken: TOKEN });
     expect(taken.status).toBe(409);
     expect(((await taken.json()) as { code: string }).code).toBe("portal_id_taken");
     const [row] = await db.select().from(portals).where(eq(portals.id, id));
@@ -132,12 +136,13 @@ describe("creating a portal", () => {
       id: "../".repeat(7),
       publicBundle: BUNDLE,
       sealedKeys: SEALED,
+      depositToken: TOKEN,
     });
     expect(malformed.status).toBe(400);
   });
 
   it("requires a session", async () => {
-    const res = await call(null, "POST", "", { id: newId(), publicBundle: BUNDLE, sealedKeys: SEALED });
+    const res = await call(null, "POST", "", { id: newId(), publicBundle: BUNDLE, sealedKeys: SEALED, depositToken: TOKEN });
     expect(res.status).toBe(401);
   });
 });
