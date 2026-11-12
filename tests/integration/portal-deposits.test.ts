@@ -219,6 +219,25 @@ describe("what an outsider with the link can use up", () => {
     });
     expect(abort.status).toBe(204);
     expect(await used()).toBe(0);
+
+    // Parallel aborts of one file refund it once, not once each.
+    const other = await addFile(body.transferId, 1 * GB);
+    await other.json();
+    const again = await addFile(body.transferId, 2 * GB);
+    const second = (await again.json()) as { fileId: string; uploadId: string };
+    expect(await used()).toBe(3 * GB);
+    const aborts = await Promise.all(
+      Array.from({ length: 5 }, () =>
+        call(null, "POST", "/api/upload/abort-multipart", {
+          transferId: body.transferId,
+          fileId: second.fileId,
+          uploadId: second.uploadId,
+        }),
+      ),
+    );
+    expect(aborts.every((r) => r.status === 204)).toBe(true);
+    expect(await used()).toBe(1 * GB);
+
     // The owner's own monthly volume was never touched.
     expect((await peekVolumeLimit(user.id, { ...rateLimiters.monthlyUploadVolume, maxBytes: 0, increment: 0 })).usedBytes).toBe(0);
   });

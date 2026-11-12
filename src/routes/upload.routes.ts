@@ -431,24 +431,27 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       return { error: 'Could not remove the upload. It will be cleaned up automatically.' };
     }
 
-    // Release the monthly volume reservation made at init.
-    const volumeConfig = {
-      ...rateLimiters.monthlyUploadVolume,
-      maxBytes: 0, // unused on release
-      increment: 0,
-    };
-    if (transfer.portalId) {
-      await releaseVolumeLimit(transfer.portalId, depositVolumeConfig(0, 0), file.size);
-    } else {
-      await releaseAuthedOrIpVolumeLimit(
-        transfer.userId === null ? undefined : me?.id,
-        ipContext,
-        volumeConfig,
-        file.size,
-      );
+    // Release the monthly volume reserved at init, but only for the
+    // request that actually removes the row. Parallel aborts of one file
+    // would otherwise each refund it and drive the counter below what was
+    // really uploaded.
+    if (await deleteFileById(file.id)) {
+      if (transfer.portalId) {
+        await releaseVolumeLimit(transfer.portalId, depositVolumeConfig(0, 0), file.size);
+      } else {
+        const volumeConfig = {
+          ...rateLimiters.monthlyUploadVolume,
+          maxBytes: 0, // unused on release
+          increment: 0,
+        };
+        await releaseAuthedOrIpVolumeLimit(
+          transfer.userId === null ? undefined : me?.id,
+          ipContext,
+          volumeConfig,
+          file.size,
+        );
+      }
     }
-
-    await deleteFileById(file.id);
 
     set.status = 204;
     return null;

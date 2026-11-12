@@ -597,8 +597,11 @@ export async function setFileUploadId(id: string, uploadId: string | null): Prom
 // path — the file never completed so there's no risk of dangling
 // transfer state, and the row should be gone (not soft-deleted) so
 // it doesn't appear in any per-transfer queries.
-export async function deleteFileById(id: string): Promise<void> {
-  await db.delete(files).where(eq(files.id, id));
+// Returns whether this call removed the row, so a caller refunding
+// something for the file does so exactly once however many requests race.
+export async function deleteFileById(id: string): Promise<boolean> {
+  const deleted = await db.delete(files).where(eq(files.id, id)).returning({ id: files.id });
+  return deleted.length > 0;
 }
 
 export async function markFileAsDeleted(id: string): Promise<void> {
