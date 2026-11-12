@@ -453,36 +453,43 @@ export async function peekVolumeLimit(
   };
 }
 
+// Fixed-window byte counter: check and increment in one step so
+// parallel uploads cannot both pass a stale read. The expiry is set only
+// when the window opens; refreshing it on every increment would mean the
+// window never closes for anyone who uploads regularly.
+// Returns {allowed, bytes used, seconds left}.
+export const VOLUME_WINDOW_LUA = `
+local used = tonumber(redis.call('GET', KEYS[1]) or '0')
+local increment = tonumber(ARGV[1])
+if used + increment > tonumber(ARGV[2]) then
+  return {0, used, redis.call('TTL', KEYS[1])}
+end
+used = redis.call('INCRBY', KEYS[1], increment)
+if redis.call('TTL', KEYS[1]) < 0 then
+  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
+end
+return {1, used, redis.call('TTL', KEYS[1])}
+`;
+
 async function checkRedisVolumeLimit(
   redis: Redis,
   key: string,
   config: VolumeLimitConfig
 ): Promise<RateLimitResult> {
   try {
-    // Get current value
-    const current = await redis.get(key);
-    const currentValue = current ? parseInt(current, 10) : 0;
-
-    // Check if adding increment would exceed limit
-    if (currentValue + config.increment > config.maxBytes) {
-      const ttl = await redis.ttl(key);
-      return {
-        allowed: false,
-        remaining: Math.max(0, config.maxBytes - currentValue),
-        resetIn: ttl > 0 ? ttl : config.windowSeconds,
-      };
-    }
-
-    // Increment the counter
-    const multi = redis.multi();
-    multi.incrby(key, config.increment);
-    multi.expire(key, config.windowSeconds);
-    await multi.exec();
+    const [allowed, used, ttl] = (await redis.eval(
+      VOLUME_WINDOW_LUA,
+      1,
+      key,
+      config.increment,
+      config.maxBytes,
+      config.windowSeconds,
+    )) as [number, number, number];
 
     return {
-      allowed: true,
-      remaining: Math.max(0, config.maxBytes - currentValue - config.increment),
-      resetIn: config.windowSeconds,
+      allowed: allowed === 1,
+      remaining: Math.max(0, config.maxBytes - used),
+      resetIn: ttl > 0 ? ttl : config.windowSeconds,
     };
   } catch (err) {
     console.warn('[RateLimit] Redis error in volume check:', err);
