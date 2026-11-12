@@ -185,7 +185,14 @@ describe("the public read", () => {
     const res = await call(null, "GET", `/${id}/public`);
     expect(res.status).toBe(200);
     const body = (await res.json()) as Record<string, unknown>;
-    expect(body).toEqual({ id, publicBundle: BUNDLE, keyVersion: 1, accepting: true });
+    expect(body).toEqual({
+      id,
+      publicBundle: BUNDLE,
+      keyVersion: 1,
+      accepting: true,
+      maxFileSize: 5 * 1024 ** 3,
+      maxTotalSize: 10 * 1024 ** 3,
+    });
   });
 
   it("stops accepting when the owner switches it off", async () => {
