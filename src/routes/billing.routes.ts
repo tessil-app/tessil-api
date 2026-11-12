@@ -7,6 +7,8 @@ import { Elysia, t } from "elysia";
 import { desc, eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { authPlugin } from "../auth/middleware";
+import { env } from "../config/env";
+import type { PaidTier } from "../config/tiers";
 import { db } from "../db";
 import { billingEvents, subscriptions, users, type Subscription } from "../db/schema";
 import {
@@ -20,8 +22,10 @@ import {
 // Pro". A subscription cancelled at period end stays `active` until the
 // period runs out, so it keeps Pro caps until then.
 const PRO_STATUSES = new Set(["active", "past_due", "trialing"]);
-function tierFromStatus(status: string): "free" | "pro" {
-  return PRO_STATUSES.has(status) ? "pro" : "free";
+function tierFor(data: PolarSubscriptionData): "free" | PaidTier {
+  if (!PRO_STATUSES.has(data.status)) return "free";
+  const maxProducts = [env.POLAR_PRODUCT_ID_MAX_MONTHLY, env.POLAR_PRODUCT_ID_MAX_ANNUAL];
+  return data.productId && maxProducts.includes(data.productId) ? "max" : "pro";
 }
 
 // `externalId` is the user ID we set at checkout — every subsequent
@@ -32,6 +36,8 @@ interface PolarSubscriptionData {
   status: string;
   currentPeriodEnd: Date | string;
   cancelAtPeriodEnd: boolean;
+  /** Which product was bought; decides the plan. */
+  productId?: string | null;
   customerId: string;
   customer: {
     id: string;
@@ -133,7 +139,7 @@ async function applySubscriptionState(
     await tx
       .update(users)
       .set({
-        tier: tierFromStatus(data.status),
+        tier: tierFor(data),
         ...(user.polarCustomerId ? {} : { polarCustomerId: data.customerId }),
       })
       .where(eq(users.id, user.id));

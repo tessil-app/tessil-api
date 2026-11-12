@@ -457,6 +457,48 @@ export async function createFile(data: Omit<NewFile, 'id' | 'r2Key' | 'storageTy
   return file;
 }
 
+// Bytes an account has stored right now: every file of every transfer it
+// owns that has not been deleted, uploads in progress included. Computed
+// from the rows, so there is no separate counter to drift.
+type Queryable = Pick<typeof db, 'select'>;
+
+export async function getStoredBytes(userId: string, executor: Queryable = db): Promise<number> {
+  const [row] = await executor
+    .select({ total: sql<number>`coalesce(sum(${files.size}), 0)` })
+    .from(files)
+    .innerJoin(transfers, eq(transfers.id, files.transferId))
+    .where(
+      and(
+        eq(transfers.userId, userId),
+        eq(transfers.isDeleted, false),
+        eq(files.isDeleted, false),
+      ),
+    );
+  return Number(row?.total ?? 0);
+}
+
+// Creates the file row only if it fits in the account's storage quota.
+// The per-account lock makes check and insert one step, so parallel
+// uploads cannot each see room for themselves. Returns null when full.
+export async function createFileWithinQuota(
+  userId: string,
+  quotaBytes: number,
+  data: Omit<NewFile, 'id' | 'r2Key' | 'storageType'>,
+): Promise<File | null> {
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`storage:${userId}`}, 0))`);
+    const used = await getStoredBytes(userId, tx);
+    if (used + data.size > quotaBytes) return null;
+
+    const id = nanoid();
+    const [file] = await tx
+      .insert(files)
+      .values({ id, r2Key: `uploads/${data.transferId}/${id}`, ...data })
+      .returning();
+    return file;
+  });
+}
+
 export async function getFilesByTransferId(transferId: string): Promise<File[]> {
   return db
     .select()

@@ -9,7 +9,7 @@ import { logAuthEvent } from "../auth/events";
 import { buildAccountExport, eraseAccount } from "../auth/users";
 import { SESSION_COOKIE_NAME, SESSION_COOKIE_OPTIONS } from "../auth/sessions";
 import { normaliseEmail } from "../auth/tokens";
-import { getFileMetadataForOwnedTransfer, listTransfersForUser, setOwnedTransferTitle, softDeleteOwnedTransfer } from "../services/file.service";
+import { getFileMetadataForOwnedTransfer, getStoredBytes, listTransfersForUser, setOwnedTransferTitle, softDeleteOwnedTransfer } from "../services/file.service";
 import { sendAccountDeletedNotification } from "../services/email.service";
 import {
   checkRateLimit,
@@ -52,14 +52,20 @@ export const meRoutes = new Elysia({ prefix: "/api/me" })
       increment: 0,
     };
 
-    const [daily, monthly] = await Promise.all([
+    const [daily, monthly, storedBytes] = await Promise.all([
       peekRateLimit(me.id, dailyConfig),
       peekVolumeLimit(me.id, monthlyConfig),
+      caps.storageBytes === null ? null : getStoredBytes(me.id),
     ]);
 
     const now = Date.now();
     return {
       tier: me.tier,
+      // NULL on plans without a storage quota.
+      storage:
+        caps.storageBytes === null || storedBytes === null
+          ? null
+          : { usedBytes: storedBytes, quotaBytes: caps.storageBytes },
       monthlyVolume: {
         usedBytes: monthly.usedBytes,
         capBytes: caps.monthlyVolumeBytes,
