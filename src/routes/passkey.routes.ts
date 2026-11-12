@@ -47,9 +47,12 @@ function authenticatorToDto(a: {
   transports: string[];
   createdAt: Date;
   lastUsedAt: Date | null;
+  credentialId: Uint8Array;
 }) {
   return {
     id: a.id,
+    // Public by design; the browser needs it to ask for this passkey.
+    credentialId: Buffer.from(a.credentialId).toString("base64url"),
     nickname: a.nickname,
     deviceType: a.deviceType,
     backedUp: a.backedUp,

@@ -8,6 +8,8 @@
 //   POST /api/me/vault/password       (auth — rewrap K_vault under new password)
 //   POST /api/me/vault/phrase         (auth — rewrap K_vault under new phrase)
 //   POST /api/me/vault/keypair        (auth, one-shot: public key + wrapped private key)
+//   PUT    /api/me/vault/passkeys/:authenticatorId  (auth, let a passkey unlock the vault)
+//   DELETE /api/me/vault/passkeys/:authenticatorId  (auth, stop that)
 
 import { Elysia, t } from "elysia";
 import { authPlugin } from "../auth/middleware";
@@ -21,7 +23,11 @@ import {
   PUBLIC_KEY_BYTES,
   WRAPPED_PRIVATE_KEY_MAX_BYTES,
   WRAPPED_PRIVATE_KEY_MIN_BYTES,
+  PRF_SALT_BYTES,
   createUserKeypair,
+  deletePasskeyWrap,
+  listPasskeyWraps,
+  setPasskeyWrap,
   createUserVault,
   getUserKeypair,
   getUserVault,
@@ -71,9 +77,20 @@ export const vaultRoutes = new Elysia({ prefix: "/api/me/vault" })
     if (!row) {
       return { isSetup: false as const };
     }
-    const keypair = await getUserKeypair(me.id);
+    const [keypair, passkeyWraps] = await Promise.all([
+      getUserKeypair(me.id),
+      listPasskeyWraps(me.id),
+    ]);
     return {
       isSetup: true as const,
+      // Passkeys that can unlock this vault, each with what the browser
+      // needs to ask the passkey for its key.
+      passkeyWraps: passkeyWraps.map((w) => ({
+        authenticatorId: w.authenticatorId,
+        credentialId: bytesToBase64Url(w.credentialId),
+        prfSalt: bytesToBase64Url(w.prfSalt),
+        wrap: bytesToBase64Url(w.wrap),
+      })),
       publicKey: keypair ? bytesToBase64Url(keypair.publicKey) : null,
       wrappedPrivateKey: keypair ? bytesToBase64Url(keypair.wrappedPrivateKey) : null,
       kdfVersion: row.kdfVersion,
@@ -214,6 +231,92 @@ export const vaultRoutes = new Elysia({ prefix: "/api/me/vault" })
         wrappedPrivateKey: t.String({ maxLength: 1024 }),
       }),
     },
+  )
+
+  .put(
+    "/passkeys/:authenticatorId",
+    async ({ params, body, me, ipContext, originRejected, request, set }) => {
+      if (originRejected) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
+      if (!me) {
+        set.status = 401;
+        return { error: "Not authenticated" };
+      }
+      const limit = await checkRateLimit(me.id, rateLimiters.vaultPasswordChange);
+      if (!limit.allowed) {
+        set.status = 429;
+        set.headers["Retry-After"] = String(limit.resetIn);
+        return { error: "Rate limit exceeded. Try again later." };
+      }
+
+      const prfSalt = decodeFixedLength(body.prfSalt, PRF_SALT_BYTES);
+      const wrap = decodeFixedLength(body.wrap, WRAP_BYTES);
+      if (!prfSalt || !wrap || !/^[A-Za-z0-9_-]{21}$/.test(params.authenticatorId)) {
+        set.status = 400;
+        return { error: "Malformed passkey wrap." };
+      }
+
+      const result = await setPasskeyWrap(me.id, {
+        authenticatorId: params.authenticatorId,
+        prfSalt,
+        wrap,
+      });
+      if (!result.ok) {
+        // Someone else's passkey and no such passkey look the same.
+        set.status = result.reason === "no_vault" ? 409 : 404;
+        return {
+          error: result.reason === "no_vault" ? "Set up the vault first." : "Passkey not found.",
+        };
+      }
+
+      await logAuthEvent({
+        eventType: "vault_passkey_unlock_enabled",
+        userId: me.id,
+        email: me.email,
+        ipContext,
+        userAgent: request.headers.get("user-agent"),
+      });
+      return { ok: true as const };
+    },
+    {
+      params: t.Object({ authenticatorId: t.String() }),
+      body: t.Object({
+        prfSalt: t.String({ maxLength: 64 }),
+        wrap: t.String({ maxLength: 128 }),
+      }),
+    },
+  )
+
+  .delete(
+    "/passkeys/:authenticatorId",
+    async ({ params, me, ipContext, originRejected, request, set }) => {
+      if (originRejected) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
+      if (!me) {
+        set.status = 401;
+        return { error: "Not authenticated" };
+      }
+      if (
+        !/^[A-Za-z0-9_-]{21}$/.test(params.authenticatorId) ||
+        !(await deletePasskeyWrap(me.id, params.authenticatorId))
+      ) {
+        set.status = 404;
+        return { error: "Passkey not found." };
+      }
+      await logAuthEvent({
+        eventType: "vault_passkey_unlock_disabled",
+        userId: me.id,
+        email: me.email,
+        ipContext,
+        userAgent: request.headers.get("user-agent"),
+      });
+      return { ok: true as const };
+    },
+    { params: t.Object({ authenticatorId: t.String() }) },
   )
 
   .post(

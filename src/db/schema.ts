@@ -377,6 +377,26 @@ export const portalMembers = pgTable('portal_members', {
   userIdx: index('portal_members_user_id_idx').on(table.userId),
 }));
 
+// A passkey that can unlock the vault. The passkey's PRF output (which
+// only the authenticator can produce) derives a key that wraps the same
+// K_vault the password and phrase wrap. One row per enrolled passkey;
+// deleting the passkey removes it.
+// See docs/adr/0014-portal-keys-and-vault-items.md, point 10.
+export const vaultPasskeyWraps = pgTable('vault_passkey_wraps', {
+  authenticatorId: varchar('authenticator_id', { length: 21 })
+    .primaryKey()
+    .references(() => authenticators.id, { onDelete: 'cascade' }),
+  userId: varchar('user_id', { length: 21 })
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  // Input to the PRF, random per wrap. Public.
+  prfSalt: bytea('prf_salt').notNull(),
+  wrap: bytea('wrap').notNull(), // iv(12) || ciphertext(32) || tag(16)
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  userIdx: index('vault_passkey_wraps_user_id_idx').on(table.userId),
+}));
+
 export type Portal = typeof portals.$inferSelect;
 export type PortalMember = typeof portalMembers.$inferSelect;
 export type VaultItem = typeof vaultItems.$inferSelect;

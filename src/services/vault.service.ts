@@ -13,7 +13,7 @@
 import { and, eq, isNull } from "drizzle-orm";
 import { db } from "../db";
 import { nanoid } from "nanoid";
-import { users, userVaults, vaultItems, type UserVault } from "../db/schema";
+import { authenticators, users, userVaults, vaultItems, vaultPasskeyWraps, type UserVault } from "../db/schema";
 
 export const WRAP_BYTES = 60;
 export const SALT_BYTES = 16;
@@ -207,3 +207,69 @@ export async function createUserKeypair(
     return { ok: true as const };
   });
 }
+
+// ─── passkey unlock ─────────────────────────────────────────────────────────
+
+export const PRF_SALT_BYTES = 32;
+
+export interface PasskeyWrap {
+  authenticatorId: string;
+  /** The WebAuthn credential ID, so the browser can ask for this passkey. */
+  credentialId: Uint8Array;
+  prfSalt: Uint8Array;
+  wrap: Uint8Array;
+}
+
+export async function listPasskeyWraps(userId: string): Promise<PasskeyWrap[]> {
+  return db
+    .select({
+      authenticatorId: vaultPasskeyWraps.authenticatorId,
+      credentialId: authenticators.credentialId,
+      prfSalt: vaultPasskeyWraps.prfSalt,
+      wrap: vaultPasskeyWraps.wrap,
+    })
+    .from(vaultPasskeyWraps)
+    .innerJoin(authenticators, eq(authenticators.id, vaultPasskeyWraps.authenticatorId))
+    .where(eq(vaultPasskeyWraps.userId, userId));
+}
+
+/**
+ * Stores (or replaces) the vault wrap for one of the user's passkeys.
+ * Refused when the vault does not exist or the passkey is not theirs.
+ */
+export async function setPasskeyWrap(
+  userId: string,
+  input: { authenticatorId: string; prfSalt: Uint8Array; wrap: Uint8Array },
+): Promise<{ ok: true } | { ok: false; reason: "no_vault" | "not_your_passkey" }> {
+  if (!(await getUserVault(userId))) return { ok: false, reason: "no_vault" };
+  const [owned] = await db
+    .select({ id: authenticators.id })
+    .from(authenticators)
+    .where(and(eq(authenticators.id, input.authenticatorId), eq(authenticators.userId, userId)))
+    .limit(1);
+  if (!owned) return { ok: false, reason: "not_your_passkey" };
+
+  await db
+    .insert(vaultPasskeyWraps)
+    .values({ authenticatorId: input.authenticatorId, userId, prfSalt: input.prfSalt, wrap: input.wrap })
+    .onConflictDoUpdate({
+      target: vaultPasskeyWraps.authenticatorId,
+      set: { prfSalt: input.prfSalt, wrap: input.wrap, createdAt: new Date() },
+    });
+  return { ok: true };
+}
+
+/** True when a wrap was removed. */
+export async function deletePasskeyWrap(userId: string, authenticatorId: string): Promise<boolean> {
+  const deleted = await db
+    .delete(vaultPasskeyWraps)
+    .where(
+      and(
+        eq(vaultPasskeyWraps.authenticatorId, authenticatorId),
+        eq(vaultPasskeyWraps.userId, userId),
+      ),
+    )
+    .returning({ id: vaultPasskeyWraps.authenticatorId });
+  return deleted.length > 0;
+}
+
