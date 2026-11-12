@@ -27,6 +27,8 @@ export type AuthEventType =
   | "passkey_deleted"
   | "vault_setup_completed"
   | "vault_keypair_created"
+  | "portal_created"
+  | "portal_deleted"
   | "vault_password_changed"
   | "vault_phrase_regenerated";
 

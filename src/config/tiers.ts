@@ -18,6 +18,8 @@ export interface TierCaps {
   storageBytes: number | null;
   /** How long portal deposits are kept. NULL on plans without portals. */
   depositRetentionDays: number | null;
+  /** Portals an account may own. 0 on plans without portals. */
+  maxPortals: number;
 }
 
 const ANONYMOUS_CAPS: TierCaps = {
@@ -28,6 +30,7 @@ const ANONYMOUS_CAPS: TierCaps = {
   allowedExpiryHours: [1, 6, 12, 24],
   storageBytes: null,
   depositRetentionDays: null,
+  maxPortals: 0,
 };
 
 // Free reads from env so production deploys can override the defaults
@@ -42,6 +45,7 @@ function freeCaps(): TierCaps {
     allowedExpiryHours: [1, 6, 12, 24, 72],
     storageBytes: null,
     depositRetentionDays: null,
+    maxPortals: 0,
   };
 }
 
@@ -63,6 +67,7 @@ function proCaps(): TierCaps {
     allowedExpiryHours: PRO_EXPIRY_HOURS,
     storageBytes: env.PLAN_PRO_STORAGE_GB,
     depositRetentionDays: env.PLAN_PRO_RETENTION_DAYS,
+    maxPortals: env.PLAN_PRO_MAX_PORTALS,
   };
 }
 
@@ -73,6 +78,7 @@ function maxCaps(): TierCaps {
     allowedExpiryHours: MAX_EXPIRY_HOURS,
     storageBytes: env.PLAN_MAX_STORAGE_GB,
     depositRetentionDays: env.PLAN_MAX_RETENTION_DAYS,
+    maxPortals: env.PLAN_MAX_MAX_PORTALS,
   };
 }
 

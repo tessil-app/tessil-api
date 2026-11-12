@@ -52,6 +52,8 @@ export const env = {
   PLAN_PRO_RETENTION_DAYS: parseInt(getEnv("PLAN_PRO_RETENTION_DAYS", "30"), 10),
   PLAN_MAX_STORAGE_GB: parseInt(getEnv("PLAN_MAX_STORAGE_GB", "100"), 10) * GB,
   PLAN_MAX_RETENTION_DAYS: parseInt(getEnv("PLAN_MAX_RETENTION_DAYS", "90"), 10),
+  PLAN_PRO_MAX_PORTALS: parseInt(getEnv("PLAN_PRO_MAX_PORTALS", "3"), 10),
+  PLAN_MAX_MAX_PORTALS: parseInt(getEnv("PLAN_MAX_MAX_PORTALS", "10"), 10),
 
   // Auth — magic-link primary. APP_URL is the public frontend origin
   // used to compose magic links and as the default base for WebAuthn
