@@ -1,5 +1,5 @@
 {
-  "id": "4e6692b6-e8d3-439d-bf6f-5ded011ae8a6",
+  "id": "454f9fe4-d776-4eea-8e4b-24acf29a55c2",
   "prevId": "45c48c1a-58e6-4a66-8349-d0cc9925e686",
   "version": "7",
   "dialect": "postgresql",
@@ -1474,19 +1474,6 @@
             "id"
           ],
           "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "transfers_portal_id_portals_id_fk": {
-          "name": "transfers_portal_id_portals_id_fk",
-          "tableFrom": "transfers",
-          "tableTo": "portals",
-          "columnsFrom": [
-            "portal_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },

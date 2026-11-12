@@ -8,8 +8,8 @@ import { createApp } from "../../src/app";
 import { db } from "../../src/db";
 import { portalMembers, portals, transfers, users } from "../../src/db/schema";
 import { eraseAccount } from "../../src/auth/users";
-import { createFile, createTransfer } from "../../src/services/file.service";
-import { resetRateLimits } from "../../src/services/ratelimit.service";
+import { createFile, createTransfer, markOrphanedDepositsDeleted } from "../../src/services/file.service";
+import { peekVolumeLimit, rateLimiters, resetRateLimits } from "../../src/services/ratelimit.service";
 import { authedRequest, createAuthedUser, testIpContext } from "../helpers/auth";
 import { ensureMigrations, resetDb } from "../helpers/db";
 
@@ -167,6 +167,63 @@ describe("depositing", () => {
   });
 });
 
+describe("what an outsider with the link can use up", () => {
+  // Space is reserved when an upload starts. Unfinished deposits in one
+  // portal may hold at most one transfer's worth between them.
+  it("cannot reserve the owner's whole storage with unfinished deposits", async () => {
+    const { cookie, portalId } = await ownerWithPortal();
+    const first = await startDeposit(portalId);
+    const second = await startDeposit(portalId);
+    expect((await addFile(first.body.transferId, 5 * GB)).status).toBe(200);
+    expect((await addFile(second.body.transferId, 5 * GB)).status).toBe(200);
+
+    const third = await startDeposit(portalId);
+    const blocked = await addFile(third.body.transferId, 1 * GB);
+    expect(blocked.status).toBe(413);
+
+    // The owner can still send: half their storage is untouched.
+    const own = await call(cookie, "POST", "/api/upload/create-transfer", { expiresInHours: 24 });
+    const { transferId } = (await own.json()) as { transferId: string };
+    expect((await addFile(transferId, 5 * GB, cookie)).status).toBe(200);
+  });
+
+  it("frees the reservation once a deposit completes", async () => {
+    const { portalId } = await ownerWithPortal();
+    const first = await startDeposit(portalId);
+    await addFile(first.body.transferId, 5 * GB);
+    const second = await startDeposit(portalId);
+    await addFile(second.body.transferId, 5 * GB);
+    await call(null, "POST", "/api/upload/complete", {
+      transferId: first.body.transferId,
+      sealedKey: SEALED_KEY,
+    });
+
+    const third = await startDeposit(portalId);
+    expect((await addFile(third.body.transferId, 5 * GB)).status).toBe(200);
+  });
+
+  it("counts uploads against a monthly volume per portal, and gives it back on abort", async () => {
+    const { user, portalId } = await ownerWithPortal();
+    const config = { ...rateLimiters.monthlyUploadVolume, prefix: "portal-deposit-volume", maxBytes: 0, increment: 0 };
+    const used = async () => (await peekVolumeLimit(portalId, config)).usedBytes;
+
+    const { body } = await startDeposit(portalId);
+    const init = await addFile(body.transferId, 3 * GB);
+    const { fileId, uploadId } = (await init.json()) as { fileId: string; uploadId: string };
+    expect(await used()).toBe(3 * GB);
+
+    const abort = await call(null, "POST", "/api/upload/abort-multipart", {
+      transferId: body.transferId,
+      fileId,
+      uploadId,
+    });
+    expect(abort.status).toBe(204);
+    expect(await used()).toBe(0);
+    // The owner's own monthly volume was never touched.
+    expect((await peekVolumeLimit(user.id, { ...rateLimiters.monthlyUploadVolume, maxBytes: 0, increment: 0 })).usedBytes).toBe(0);
+  });
+});
+
 describe("a portal that is not accepting", () => {
   it("refuses new deposits when switched off, and uploads to one already started", async () => {
     const { cookie, portalId } = await ownerWithPortal();
@@ -287,6 +344,24 @@ describe("removing deposits", () => {
     expect((await call(cookie, "DELETE", `/api/portals/${portalId}`)).status).toBe(204);
     expect(await isDeleted(transferId)).toBe(true);
     expect(await db.select().from(portals).where(eq(portals.id, portalId))).toHaveLength(0);
+  });
+
+  // A deposit started in the same instant its portal is deleted misses
+  // the portal's own cleanup. It must not live on as an ordinary transfer.
+  it("sweeps a deposit whose portal is gone, and never serves it publicly", async () => {
+    const { portalId } = await ownerWithPortal();
+    const { transferId, fileId } = await deposit(portalId);
+    // Remove the portal without its cleanup, as a lost race would.
+    await db.delete(portals).where(eq(portals.id, portalId));
+
+    const [row] = await db.select().from(transfers).where(eq(transfers.id, transferId));
+    expect(row.portalId).toBe(portalId);
+    expect((await call(null, "GET", `/api/download/transfer/${transferId}`)).status).toBe(404);
+    expect((await call(null, "GET", `/api/download/file/${fileId}/url`)).status).toBe(404);
+    expect((await addFile(transferId, 1024)).status).toBe(409);
+
+    expect(await markOrphanedDepositsDeleted()).toBe(1);
+    expect(await isDeleted(transferId)).toBe(true);
   });
 
   it("marks every deposit deleted when the owner erases their account", async () => {

@@ -504,15 +504,37 @@ export async function getStoredBytes(userId: string, executor: Queryable = db): 
 // Creates the file row only if it fits in the account's storage quota.
 // The per-account lock makes check and insert one step, so parallel
 // uploads cannot each see room for themselves. Returns null when full.
+//
+// `pending` applies to deposits: unfinished deposits in one portal may
+// hold at most `maxBytes` between them. Space is reserved when an upload
+// starts, so without this an outsider with the link could reserve the
+// owner's whole quota without sending a byte.
 export async function createFileWithinQuota(
   userId: string,
   quotaBytes: number,
   data: Omit<NewFile, 'id' | 'r2Key' | 'storageType'>,
+  pending?: { portalId: string; maxBytes: number },
 ): Promise<File | null> {
   return db.transaction(async (tx) => {
     await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`storage:${userId}`}, 0))`);
     const used = await getStoredBytes(userId, tx);
     if (used + data.size > quotaBytes) return null;
+
+    if (pending) {
+      const [row] = await tx
+        .select({ total: sql<number>`coalesce(sum(${files.size}), 0)` })
+        .from(files)
+        .innerJoin(transfers, eq(transfers.id, files.transferId))
+        .where(
+          and(
+            eq(transfers.portalId, pending.portalId),
+            eq(transfers.isCompleted, false),
+            eq(transfers.isDeleted, false),
+            eq(files.isDeleted, false),
+          ),
+        );
+      if (Number(row?.total ?? 0) + data.size > pending.maxBytes) return null;
+    }
 
     const id = nanoid();
     const [file] = await tx
@@ -734,6 +756,26 @@ export async function softDeleteDeposit(portalId: string, transferId: string): P
     )
     .returning({ id: transfers.id });
   return updated.length > 0;
+}
+
+/**
+ * Marks deleted every deposit whose portal no longer exists. Deleting a
+ * portal marks its deposits itself; this catches one that was started in
+ * the same instant, so nothing depends on winning that race.
+ */
+export async function markOrphanedDepositsDeleted(): Promise<number> {
+  const updated = await db
+    .update(transfers)
+    .set({ isDeleted: true })
+    .where(
+      and(
+        sql`${transfers.portalId} IS NOT NULL`,
+        eq(transfers.isDeleted, false),
+        notExists(db.select({ id: portals.id }).from(portals).where(eq(portals.id, transfers.portalId))),
+      ),
+    )
+    .returning({ id: transfers.id });
+  return updated.length;
 }
 
 /** Marks every deposit of a portal deleted, before the portal row goes. */

@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { type AnyPgColumn, pgTable, varchar, bigint, timestamp, integer, boolean, serial, uniqueIndex, index, text, jsonb, customType } from 'drizzle-orm/pg-core';
+import { pgTable, varchar, bigint, timestamp, integer, boolean, serial, uniqueIndex, index, text, jsonb, customType } from 'drizzle-orm/pg-core';
 
 // Drizzle ORM ships a `bytea` type only via the experimental column builder
 // in some versions. customType is portable and lets us round-trip Uint8Array.
@@ -38,8 +38,11 @@ export const transfers = pgTable('transfers', {
   encryptedTitleIv: varchar('encrypted_title_iv', { length: 32 }),
   // Set on a deposit: a transfer uploaded through a portal. A deposit has
   // no owner (user_id NULL) and no share link; only the portal's members
-  // can list and download it.
-  portalId: varchar('portal_id', { length: 21 }).references((): AnyPgColumn => portals.id, { onDelete: 'set null' }),
+  // can list and download it. Deliberately not a foreign key: the value
+  // must outlive the portal, so a deposit can never lose it and start to
+  // look like an ordinary anonymous transfer. The sweep removes deposits
+  // whose portal is gone.
+  portalId: varchar('portal_id', { length: 21 }),
   // The deposit's key, sealed in the depositor's browser to the portal's
   // public key. NULL on ordinary transfers.
   sealedKey: bytea('sealed_key'),

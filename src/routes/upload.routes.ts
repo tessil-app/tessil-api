@@ -8,8 +8,10 @@ import {
 import {
   checkAuthedOrIpRateLimit,
   checkAuthedOrIpVolumeLimit,
+  checkVolumeLimit,
   rateLimiters,
   releaseAuthedOrIpVolumeLimit,
+  releaseVolumeLimit,
 } from '../services/ratelimit.service';
 import { resolveCaps } from '../config/tiers';
 import { findUserById } from '../auth/users';
@@ -38,6 +40,16 @@ const WRAPPED_KEY_BYTES = 60;
 const PASSWORD_SALT_BYTES = 16;
 // mode(1) + encapsulated key(65) + key(32) + tag(16).
 const SEALED_KEY_BYTES = 114;
+
+// Monthly volume through one portal, keyed by the portal's ID.
+function depositVolumeConfig(maxBytes: number, increment: number) {
+  return {
+    ...rateLimiters.monthlyUploadVolume,
+    prefix: 'portal-deposit-volume',
+    maxBytes,
+    increment,
+  };
+}
 
 // The account a deposit is stored for, or null when the portal is gone,
 // switched off, or its owner is no longer on a plan with portals.
@@ -234,12 +246,17 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       maxBytes: caps.monthlyVolumeBytes,
       increment: size,
     };
-    // A depositor is an outsider: their upload is bounded by the portal
-    // owner's storage and the deposit rate limits, not by a monthly
-    // allowance of their own or the owner's.
+    // A depositor is an outsider with no allowance of their own. Their
+    // upload counts against a monthly volume kept per portal, sized like
+    // the owner's, so a link cannot be used to push unlimited bytes
+    // through by uploading and aborting.
     const volumeLimit = deposit
-      ? { allowed: true, remaining: 0, resetIn: 0 }
+      ? await checkVolumeLimit(transfer.portalId!, depositVolumeConfig(caps.monthlyVolumeBytes, size))
       : await checkAuthedOrIpVolumeLimit(owner?.id, ipContext, volumeConfig);
+    const releaseVolume = () =>
+      deposit
+        ? releaseVolumeLimit(transfer.portalId!, depositVolumeConfig(0, 0), size)
+        : releaseAuthedOrIpVolumeLimit(owner?.id, ipContext, volumeConfig, size);
     if (!volumeLimit.allowed) {
       set.status = 429;
       set.headers['Retry-After'] = String(volumeLimit.resetIn);
@@ -263,10 +280,15 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
     };
     const file =
       owner && caps.storageBytes !== null
-        ? await createFileWithinQuota(owner.id, caps.storageBytes, fileData)
+        ? await createFileWithinQuota(
+            owner.id,
+            caps.storageBytes,
+            fileData,
+            deposit ? { portalId: transfer.portalId!, maxBytes: caps.maxTransferSize } : undefined,
+          )
         : await createFile(fileData);
     if (!file) {
-      if (!deposit) await releaseAuthedOrIpVolumeLimit(owner?.id, ipContext, volumeConfig, size);
+      await releaseVolume();
       set.status = 413;
       return deposit
         ? { error: 'This portal is full and cannot accept files right now.', code: 'portal_full' }
@@ -291,7 +313,7 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       // (Caller would otherwise have nothing to abort against.)
       console.error('[upload] initMultipartUpload failed:', err);
       await deleteFileById(file.id);
-      if (!deposit) await releaseAuthedOrIpVolumeLimit(owner?.id, ipContext, volumeConfig, size);
+      await releaseVolume();
       set.status = 502;
       return { error: 'Storage initialisation failed. Please try again.' };
     }
@@ -415,7 +437,9 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       maxBytes: 0, // unused on release
       increment: 0,
     };
-    if (!transfer.portalId) {
+    if (transfer.portalId) {
+      await releaseVolumeLimit(transfer.portalId, depositVolumeConfig(0, 0), file.size);
+    } else {
       await releaseAuthedOrIpVolumeLimit(
         transfer.userId === null ? undefined : me?.id,
         ipContext,
