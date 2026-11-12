@@ -625,6 +625,9 @@ export const rateLimiters = {
   portalDepositPerPortal: { prefix: 'portal-deposit-portal', windowSeconds: HOUR_SECONDS, maxRequests: 60 },
   portalMemberRead: { prefix: 'portal-member-read', windowSeconds: 60, maxRequests: 120 },
 
+  // The keypair is created right after setup and retried at each unlock
+  // until it exists, so it must not share setup's small allowance.
+  vaultKeypair: { prefix: 'vault-keypair', windowSeconds: HOUR_SECONDS, maxRequests: 20 },
   vaultSetup: { prefix: 'vault-setup', windowSeconds: HOUR_SECONDS, maxRequests: 5 },
   vaultPasswordChange: { prefix: 'vault-password-change', windowSeconds: HOUR_SECONDS, maxRequests: 10 },
   vaultPhraseRegenerate: { prefix: 'vault-phrase-regen', windowSeconds: HOUR_SECONDS, maxRequests: 5 },

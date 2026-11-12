@@ -223,7 +223,7 @@ export const vaultRoutes = new Elysia({ prefix: "/api/me/vault" })
         return { error: "Not authenticated" };
       }
 
-      const limit = await checkRateLimit(me.id, rateLimiters.vaultSetup);
+      const limit = await checkRateLimit(me.id, rateLimiters.vaultKeypair);
       if (!limit.allowed) {
         set.status = 429;
         set.headers["Retry-After"] = String(limit.resetIn);
