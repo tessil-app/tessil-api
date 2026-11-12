@@ -18,6 +18,10 @@ export const transfers = pgTable('transfers', {
   isDeleted: boolean('is_deleted').default(false).notNull(),
   isCompleted: boolean('is_completed').default(false).notNull(),
   passwordHash: varchar('password_hash', { length: 255 }), // NULL = no password
+  // Salt the browser used to derive the verifier hashed above. Public,
+  // handed to recipients so they can derive the same verifier. NULL on
+  // unprotected transfers and on older ones that sent the password itself.
+  passwordSalt: varchar('password_salt', { length: 32 }),
   // NULL on anonymous transfers; otherwise references the creator.
   userId: varchar('user_id', { length: 21 }).references(() => users.id),
   // K_transfer wrapped under the owner's per-user K_vault. NULL on

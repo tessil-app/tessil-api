@@ -1,0 +1,1 @@
+ALTER TABLE "transfers" ADD COLUMN "password_salt" varchar(32);

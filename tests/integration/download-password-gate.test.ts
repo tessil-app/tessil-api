@@ -169,3 +169,80 @@ describe("POST /api/download/transfer/:id/verify — issues access token", () =>
     expect(urlRes.status).toBe(200);
   });
 });
+
+// ─── Password verifier with a client-side salt ─────────────────────────────
+
+describe("password salt round trip", () => {
+  const SALT = Buffer.alloc(16, 7).toString("base64url");
+  const post = (path: string, body: object) =>
+    app.handle(
+      new Request(`${APP_URL}${path}`, {
+        method: "POST",
+        headers: {
+          Origin: APP_URL,
+          "Content-Type": "application/json",
+          "cf-connecting-ip": `203.0.113.${Math.floor(Math.random() * 200) + 1}`,
+        },
+        body: JSON.stringify(body),
+      }),
+    );
+
+  it("stores the salt and returns it before the password is verified", async () => {
+    const created = await post("/api/upload/create-transfer", {
+      expiresInHours: 1,
+      password: "derived-verifier-not-the-password",
+      passwordSalt: SALT,
+    });
+    expect(created.status).toBe(200);
+    const { transferId } = (await created.json()) as { transferId: string };
+    await createFile({
+      transferId,
+      encryptedName: "x".repeat(32),
+      encryptedNameIv: "y".repeat(24),
+      fileIv: "z".repeat(24),
+      size: 1024,
+      mimeType: "application/octet-stream",
+    });
+    await completeTransfer(transferId);
+
+    const meta = await app.handle(
+      new Request(`${APP_URL}/api/download/transfer/${transferId}`, {
+        headers: { Origin: APP_URL, "cf-connecting-ip": "203.0.113.77" },
+      }),
+    );
+    const body = (await meta.json()) as { passwordRequired: boolean; passwordSalt: string | null };
+    expect(body.passwordRequired).toBe(true);
+    expect(body.passwordSalt).toBe(SALT);
+
+    const ok = await post(`/api/download/transfer/${transferId}/verify`, {
+      password: "derived-verifier-not-the-password",
+    });
+    expect(ok.status).toBe(200);
+  });
+
+  it("returns a null salt for a transfer created without one", async () => {
+    const { transfer } = await seedTransfer({ password: "legacy-password" });
+    const meta = await app.handle(
+      new Request(`${APP_URL}/api/download/transfer/${transfer.id}`, {
+        headers: { Origin: APP_URL, "cf-connecting-ip": "203.0.113.78" },
+      }),
+    );
+    const body = (await meta.json()) as { passwordSalt: string | null };
+    expect(body.passwordSalt).toBeNull();
+  });
+
+  it("rejects a malformed salt or a salt without a password", async () => {
+    const short = await post("/api/upload/create-transfer", {
+      expiresInHours: 1,
+      password: "derived-verifier-not-the-password",
+      passwordSalt: "AAAA",
+    });
+    expect(short.status).toBe(400);
+
+    const alone = await post("/api/upload/create-transfer", {
+      expiresInHours: 1,
+      passwordSalt: SALT,
+    });
+    expect(alone.status).toBe(400);
+  });
+});

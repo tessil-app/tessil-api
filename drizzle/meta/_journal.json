@@ -99,6 +99,13 @@
       "when": 1794488630807,
       "tag": "0013_file_upload_id_and_download_count",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1794490205205,
+      "tag": "0014_transfer_password_salt",
+      "breakpoints": true
     }
   ]
 }
