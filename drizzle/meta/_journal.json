@@ -113,6 +113,13 @@
       "when": 1794492749841,
       "tag": "0015_vault_items_and_user_public_key",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1794494443278,
+      "tag": "0016_portals",
+      "breakpoints": true
     }
   ]
 }

@@ -320,6 +320,48 @@ export const vaultItems = pgTable('vault_items', {
   userKindUnique: uniqueIndex('vault_items_user_kind_unique').on(table.userId, table.kind),
 }));
 
+// A portal: a persistent link where outsiders upload files only its
+// members can read. The server holds two opaque blobs per portal and can
+// read neither. See docs/adr/0014-portal-keys-and-vault-items.md.
+//
+//   public_bundle  the portal's public key and title, encrypted under the
+//                  link key in the URL fragment. Depositors decrypt it, so
+//                  the server can neither read the title nor swap the key.
+//   sealed_keys    (per member) the portal private key and link key,
+//                  sealed to that member's public key.
+export const portals = pgTable('portals', {
+  id: varchar('id', { length: 21 }).primaryKey(), // nanoid
+  ownerId: varchar('owner_id', { length: 21 })
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  publicBundle: bytea('public_bundle').notNull(),
+  // Bumped when the portal keypair is rotated.
+  keyVersion: integer('key_version').default(1).notNull(),
+  // Owner's switch to stop new deposits without deleting anything.
+  isDisabled: boolean('is_disabled').default(false).notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  ownerIdx: index('portals_owner_id_idx').on(table.ownerId),
+}));
+
+export const portalMembers = pgTable('portal_members', {
+  portalId: varchar('portal_id', { length: 21 })
+    .notNull()
+    .references(() => portals.id, { onDelete: 'cascade' }),
+  userId: varchar('user_id', { length: 21 })
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  role: varchar('role', { length: 16 }).notNull(), // 'owner' | 'member'
+  keyVersion: integer('key_version').default(1).notNull(),
+  sealedKeys: bytea('sealed_keys').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  portalUserUnique: uniqueIndex('portal_members_portal_user_unique').on(table.portalId, table.userId),
+  userIdx: index('portal_members_user_id_idx').on(table.userId),
+}));
+
+export type Portal = typeof portals.$inferSelect;
+export type PortalMember = typeof portalMembers.$inferSelect;
 export type VaultItem = typeof vaultItems.$inferSelect;
 export type Authenticator = typeof authenticators.$inferSelect;
 export type NewAuthenticator = typeof authenticators.$inferInsert;

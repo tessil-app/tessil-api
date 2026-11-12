@@ -616,6 +616,10 @@ export const rateLimiters = {
   // Vault writes — setup is one-shot; password/phrase rewrap is gated
   // to dampen brute-force-by-reupload of wrap blobs and accidental
   // double-submits from the UI.
+  // Portals. Writes are rare; the public read is hit once per visitor.
+  portalWrite: { prefix: 'portal-write', windowSeconds: HOUR_SECONDS, maxRequests: 30 },
+  portalPublic: { prefix: 'portal-public', windowSeconds: 60, maxRequests: 30 },
+
   vaultSetup: { prefix: 'vault-setup', windowSeconds: HOUR_SECONDS, maxRequests: 5 },
   vaultPasswordChange: { prefix: 'vault-password-change', windowSeconds: HOUR_SECONDS, maxRequests: 10 },
   vaultPhraseRegenerate: { prefix: 'vault-phrase-regen', windowSeconds: HOUR_SECONDS, maxRequests: 5 },
