@@ -6,7 +6,8 @@
 //   - Missing `webhook-id` header → 400.
 //   - `subscription.created` → tier='pro', subscription row, sets
 //     polar_customer_id on first sight.
-//   - `subscription.canceled` → tier='free', canceledAt timestamp set.
+//   - `subscription.canceled` → still Pro until the period ends.
+//   - `subscription.revoked` → tier='free', canceledAt timestamp set.
 //   - Idempotent delivery: same `webhook-id` twice → second is a no-op
 //     via the billing_events UNIQUE constraint, no second mutation.
 //   - Unknown externalCustomerId → handler returns ok=false but the
@@ -122,7 +123,7 @@ function subscriptionCreatedPayload(opts: {
   };
 }
 
-function subscriptionCanceledPayload(opts: {
+function subscriptionRevokedPayload(opts: {
   subscriptionId: string;
   customerId: string;
   externalId: string;
@@ -130,7 +131,7 @@ function subscriptionCanceledPayload(opts: {
   const created = subscriptionCreatedPayload(opts);
   return {
     ...created,
-    type: "subscription.canceled",
+    type: "subscription.revoked",
     data: {
       ...created.data,
       status: "canceled",
@@ -277,7 +278,64 @@ describe("POST /api/billing/webhook — subscription.created", () => {
 
 // ─── subscription.canceled ───────────────────────────────────────────────────
 
-describe("POST /api/billing/webhook — subscription.canceled", () => {
+// Polar sends `canceled` when the customer schedules the end. The
+// subscription stays active until the period runs out, then `revoked`.
+describe("POST /api/billing/webhook: cancel at period end", () => {
+  it("keeps Pro on canceled, restores on uncanceled, ends on revoked", async () => {
+    const { user } = await createAuthedUser();
+    const ids = { subscriptionId: "sub_period_end", customerId: "cus_period_end", externalId: user.id };
+    const deliver = async (payload: object, id: string) => {
+      const signed = signEvent(payload, id);
+      const res = await app.handle(
+        new Request(`${APP_URL}/api/billing/webhook`, {
+          method: "POST",
+          headers: signed.headers,
+          body: signed.body,
+        }),
+      );
+      expect(res.status).toBe(200);
+    };
+    const at = (offsetMs: number) => new Date(Date.now() + offsetMs).toISOString();
+    const state = async () => {
+      const [u] = await db.select().from(users).where(eq(users.id, user.id));
+      const [sub] = await db
+        .select()
+        .from(subscriptions)
+        .where(eq(subscriptions.polarSubscriptionId, ids.subscriptionId));
+      return { tier: u.tier, sub };
+    };
+
+    const created = subscriptionCreatedPayload(ids);
+    await deliver({ ...created, timestamp: at(0) }, "msg_pe_created");
+
+    const scheduled = subscriptionCreatedPayload({ ...ids, cancelAtPeriodEnd: true });
+    await deliver(
+      { ...scheduled, type: "subscription.canceled", timestamp: at(1000) },
+      "msg_pe_canceled",
+    );
+    let now = await state();
+    expect(now.tier).toBe("pro");
+    expect(now.sub.cancelAtPeriodEnd).toBe(true);
+    expect(now.sub.canceledAt).toBeNull();
+
+    await deliver(
+      { ...created, type: "subscription.uncanceled", timestamp: at(2000) },
+      "msg_pe_uncanceled",
+    );
+    now = await state();
+    expect(now.tier).toBe("pro");
+    expect(now.sub.cancelAtPeriodEnd).toBe(false);
+
+    await deliver({ ...subscriptionRevokedPayload(ids), timestamp: at(3000) }, "msg_pe_revoked");
+    now = await state();
+    expect(now.tier).toBe("free");
+    expect(now.sub.canceledAt).not.toBeNull();
+  });
+});
+
+// ─── subscription.revoked ────────────────────────────────────────────────────
+
+describe("POST /api/billing/webhook — subscription.revoked", () => {
   it("flips users.tier to 'free' and sets canceled_at on the subscription", async () => {
     const { user } = await createAuthedUser();
 
@@ -300,7 +358,7 @@ describe("POST /api/billing/webhook — subscription.canceled", () => {
 
     // Then cancel it.
     const canceled = signEvent(
-      subscriptionCanceledPayload({
+      subscriptionRevokedPayload({
         subscriptionId: "sub_to_cancel",
         customerId: "cus_to_cancel",
         externalId: user.id,
@@ -388,7 +446,7 @@ describe("POST /api/billing/webhook — retry after a failed delivery", () => {
     // subscriptions.user_id, so the handler throws on the first delivery.
     const userId = "retry-user-0000000001";
     const signed = signEvent(
-      subscriptionCanceledPayload({
+      subscriptionRevokedPayload({
         subscriptionId: "sub_retry",
         customerId: "cus_retry",
         externalId: userId,
@@ -455,7 +513,7 @@ describe("POST /api/billing/webhook — stale events", () => {
     const t1 = new Date(Date.now() - 30_000).toISOString();
 
     await send({ ...subscriptionCreatedPayload(ids), timestamp: t0 }, "msg_stale_created");
-    await send({ ...subscriptionCanceledPayload(ids), timestamp: t1 }, "msg_stale_canceled");
+    await send({ ...subscriptionRevokedPayload(ids), timestamp: t1 }, "msg_stale_canceled");
 
     // Same moment as the original, arriving last.
     const late = await send(
@@ -486,7 +544,7 @@ describe("POST /api/billing/webhook — stale events", () => {
       await send({ ...subscriptionCreatedPayload(ids), timestamp: t0 }, `msg_race_c_${round}`);
 
       await Promise.all([
-        send({ ...subscriptionCanceledPayload(ids), timestamp: t1 }, `msg_race_x_${round}`),
+        send({ ...subscriptionRevokedPayload(ids), timestamp: t1 }, `msg_race_x_${round}`),
         send(
           { ...subscriptionCreatedPayload(ids), type: "subscription.active", timestamp: t0 },
           `msg_race_a_${round}`,

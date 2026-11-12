@@ -17,7 +17,8 @@ import {
 } from "../services/polar.service";
 
 // Polar `subscription.status` values that map to "user is currently
-// Pro". `canceled` is terminal; everything else keeps Pro caps.
+// Pro". A subscription cancelled at period end stays `active` until the
+// period runs out, so it keeps Pro caps until then.
 const PRO_STATUSES = new Set(["active", "past_due", "trialing"]);
 function tierFromStatus(status: string): "free" | "pro" {
   return PRO_STATUSES.has(status) ? "pro" : "free";
@@ -63,9 +64,10 @@ function toDate(value: Date | string): Date {
 
 // Single upsert path for every "subscription is currently in state X"
 // event. `subscription.created`, `.updated`, `.active`, `.past_due`,
-// `.uncanceled` all funnel through here. `.canceled` and `.revoked`
-// route through `applyTerminalCancel` instead because they set
-// canceled_at and flip tier to 'free' regardless of status string.
+// `.canceled` and `.uncanceled` all funnel through here. `.canceled`
+// only schedules the end: the customer keeps what they paid for until
+// `.revoked` arrives, which routes through `applyTerminalCancel`, sets
+// canceled_at and flips tier to 'free' regardless of status string.
 async function applySubscriptionState(
   data: PolarSubscriptionData,
   eventAt: Date,
@@ -343,6 +345,7 @@ export const billingRoutes = new Elysia({ prefix: "/api/billing" })
           case "subscription.created":
           case "subscription.active":
           case "subscription.updated":
+          case "subscription.canceled":
           case "subscription.uncanceled":
           case "subscription.past_due":
             result = await applySubscriptionState(
@@ -350,7 +353,6 @@ export const billingRoutes = new Elysia({ prefix: "/api/billing" })
               eventTime((event as { timestamp?: unknown }).timestamp),
             );
             break;
-          case "subscription.canceled":
           case "subscription.revoked":
             result = await applyTerminalCancel(
               event.data as unknown as PolarSubscriptionData,
