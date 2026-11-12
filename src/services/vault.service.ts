@@ -20,11 +20,14 @@ export const SALT_BYTES = 16;
 export const CURRENT_KDF_VERSION = 1;
 
 export interface VaultBlobs {
-  saltPassword: Uint8Array;
+  /** Absent for a vault without a password; then `passkey` is required. */
+  saltPassword?: Uint8Array;
+  wrapPassword?: Uint8Array;
   saltPhrase: Uint8Array;
-  wrapPassword: Uint8Array;
   wrapPhrase: Uint8Array;
   kdfVersion: number;
+  /** A passkey that unlocks the vault from the start. */
+  passkey?: { authenticatorId: string; prfSalt: Uint8Array; wrap: Uint8Array };
 }
 
 /** Fetch the vault row for a user, or null if setup has not happened. */
@@ -50,18 +53,29 @@ export async function getUserVault(userId: string): Promise<UserVault | null> {
 export async function createUserVault(
   userId: string,
   blobs: VaultBlobs,
-): Promise<{ ok: true } | { ok: false; reason: "already_setup" }> {
+): Promise<{ ok: true } | { ok: false; reason: "already_setup" | "not_your_passkey" }> {
   const existing = await getUserVault(userId);
   if (existing) return { ok: false, reason: "already_setup" };
+
+  if (blobs.passkey) {
+    const [owned] = await db
+      .select({ id: authenticators.id })
+      .from(authenticators)
+      .where(
+        and(eq(authenticators.id, blobs.passkey.authenticatorId), eq(authenticators.userId, userId)),
+      )
+      .limit(1);
+    if (!owned) return { ok: false, reason: "not_your_passkey" };
+  }
 
   return db.transaction(async (tx) => {
     const inserted = await tx
       .insert(userVaults)
       .values({
         userId,
-        saltPassword: blobs.saltPassword,
+        saltPassword: blobs.saltPassword ?? null,
         saltPhrase: blobs.saltPhrase,
-        wrapPassword: blobs.wrapPassword,
+        wrapPassword: blobs.wrapPassword ?? null,
         wrapPhrase: blobs.wrapPhrase,
         kdfVersion: blobs.kdfVersion,
       })
@@ -70,6 +84,17 @@ export async function createUserVault(
 
     if (inserted.length === 0) {
       return { ok: false, reason: "already_setup" } as const;
+    }
+
+    // Same transaction as the vault: a vault without a password must
+    // never exist without the passkey wrap that opens it.
+    if (blobs.passkey) {
+      await tx.insert(vaultPasskeyWraps).values({
+        authenticatorId: blobs.passkey.authenticatorId,
+        userId,
+        prfSalt: blobs.passkey.prfSalt,
+        wrap: blobs.passkey.wrap,
+      });
     }
 
     await tx

@@ -307,9 +307,11 @@ export const userVaults = pgTable('user_vaults', {
   userId: varchar('user_id', { length: 21 })
     .primaryKey()
     .references(() => users.id, { onDelete: 'cascade' }),
-  saltPassword: bytea('salt_password').notNull(),
+  // The password pair is NULL for a vault opened by passkey and recovery
+  // phrase only. Both are set or both are NULL.
+  saltPassword: bytea('salt_password'),
   saltPhrase: bytea('salt_phrase').notNull(),
-  wrapPassword: bytea('wrap_password').notNull(),
+  wrapPassword: bytea('wrap_password'),
   wrapPhrase: bytea('wrap_phrase').notNull(),
   kdfVersion: integer('kdf_version').default(1).notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),

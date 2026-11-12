@@ -134,6 +134,13 @@
       "when": 1794503501980,
       "tag": "0018_vault_passkey_wraps",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1794505329532,
+      "tag": "0019_vault_password_optional",
+      "breakpoints": true
     }
   ]
 }

@@ -157,3 +157,90 @@ describe("the passkey list", () => {
     expect(body.authenticators).toMatchObject([{ id: passkey.id, credentialId: b64(credentialId) }]);
   });
 });
+
+// A vault opened by passkey and recovery phrase only, with no password.
+describe("setting up a vault without a password", () => {
+  const PHRASE = { kdfVersion: 1, saltPhrase: b64(new Uint8Array(16).fill(3)), wrapPhrase: b64(new Uint8Array(60).fill(4)) };
+  const status = async (cookie: string) =>
+    (await (await call(cookie, "GET", "/api/me/vault")).json()) as Record<string, unknown>;
+
+  it("tells the browser it can, before a vault exists", async () => {
+    const { cookie } = await account(false);
+    expect(await status(cookie)).toEqual({ isSetup: false, passkeyOnlySetup: true });
+  });
+
+  it("creates the vault and its passkey wrap together", async () => {
+    const { cookie, passkey, credentialId } = await account(false);
+    const res = await call(cookie, "POST", "/api/me/vault/setup", {
+      ...PHRASE,
+      passkey: { authenticatorId: passkey.id, prfSalt: SALT, wrap: WRAP },
+    });
+    expect(res.status).toBe(200);
+
+    const s = await status(cookie);
+    expect(s.isSetup).toBe(true);
+    expect(s.saltPassword).toBeNull();
+    expect(s.wrapPassword).toBeNull();
+    expect(s.wrapPhrase).toBe(PHRASE.wrapPhrase);
+    expect(s.passkeyWraps).toEqual([
+      { authenticatorId: passkey.id, credentialId: b64(credentialId), prfSalt: SALT, wrap: WRAP },
+    ]);
+  });
+
+  it("refuses a vault with neither a password nor a passkey", async () => {
+    const { cookie } = await account(false);
+    const res = await call(cookie, "POST", "/api/me/vault/setup", PHRASE);
+    expect(res.status).toBe(400);
+    expect((await status(cookie)).isSetup).toBe(false);
+  });
+
+  it("creates nothing when the passkey belongs to someone else", async () => {
+    const mine = await account(false);
+    const theirs = await account(false);
+    const res = await call(mine.cookie, "POST", "/api/me/vault/setup", {
+      ...PHRASE,
+      passkey: { authenticatorId: theirs.passkey.id, prfSalt: SALT, wrap: WRAP },
+    });
+    expect(res.status).toBe(404);
+    expect((await status(mine.cookie)).isSetup).toBe(false);
+    expect(await db.select().from(vaultPasskeyWraps)).toHaveLength(0);
+  });
+
+  it("refuses half a password", async () => {
+    const { cookie, passkey } = await account(false);
+    const res = await call(cookie, "POST", "/api/me/vault/setup", {
+      ...PHRASE,
+      saltPassword: b64(new Uint8Array(16)),
+      passkey: { authenticatorId: passkey.id, prfSalt: SALT, wrap: WRAP },
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("still creates a password vault exactly as before", async () => {
+    const { cookie } = await account(false);
+    const res = await call(cookie, "POST", "/api/me/vault/setup", {
+      ...PHRASE,
+      saltPassword: b64(new Uint8Array(16).fill(5)),
+      wrapPassword: b64(new Uint8Array(60).fill(6)),
+    });
+    expect(res.status).toBe(200);
+    const s = await status(cookie);
+    expect(s.wrapPassword).toBe(b64(new Uint8Array(60).fill(6)));
+    expect(s.passkeyWraps).toEqual([]);
+  });
+
+  it("lets a password be added later", async () => {
+    const { cookie, passkey } = await account(false);
+    await call(cookie, "POST", "/api/me/vault/setup", {
+      ...PHRASE,
+      passkey: { authenticatorId: passkey.id, prfSalt: SALT, wrap: WRAP },
+    });
+    const added = await call(cookie, "POST", "/api/me/vault/password", {
+      kdfVersion: 1,
+      saltPassword: b64(new Uint8Array(16).fill(7)),
+      wrapPassword: b64(new Uint8Array(60).fill(8)),
+    });
+    expect(added.status).toBe(200);
+    expect((await status(cookie)).wrapPassword).toBe(b64(new Uint8Array(60).fill(8)));
+  });
+});

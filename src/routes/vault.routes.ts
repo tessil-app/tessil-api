@@ -75,7 +75,8 @@ export const vaultRoutes = new Elysia({ prefix: "/api/me/vault" })
     }
     const row = await getUserVault(me.id);
     if (!row) {
-      return { isSetup: false as const };
+      // Tells the browser this API can create a vault without a password.
+      return { isSetup: false as const, passkeyOnlySetup: true as const };
     }
     const [keypair, passkeyWraps] = await Promise.all([
       getUserKeypair(me.id),
@@ -94,9 +95,10 @@ export const vaultRoutes = new Elysia({ prefix: "/api/me/vault" })
       publicKey: keypair ? bytesToBase64Url(keypair.publicKey) : null,
       wrappedPrivateKey: keypair ? bytesToBase64Url(keypair.wrappedPrivateKey) : null,
       kdfVersion: row.kdfVersion,
-      saltPassword: bytesToBase64Url(row.saltPassword),
+      // Both null for a vault opened by passkey and recovery phrase only.
+      saltPassword: row.saltPassword ? bytesToBase64Url(row.saltPassword) : null,
       saltPhrase: bytesToBase64Url(row.saltPhrase),
-      wrapPassword: bytesToBase64Url(row.wrapPassword),
+      wrapPassword: row.wrapPassword ? bytesToBase64Url(row.wrapPassword) : null,
       wrapPhrase: bytesToBase64Url(row.wrapPhrase),
       passwordChangedAt: row.passwordChangedAt?.toISOString() ?? null,
       phraseRegeneratedAt: row.phraseRegeneratedAt?.toISOString() ?? null,
@@ -127,22 +129,50 @@ export const vaultRoutes = new Elysia({ prefix: "/api/me/vault" })
         return { error: "Unsupported kdfVersion." };
       }
 
-      const saltPassword = decodeFixedLength(body.saltPassword, SALT_BYTES);
       const saltPhrase = decodeFixedLength(body.saltPhrase, SALT_BYTES);
-      const wrapPassword = decodeFixedLength(body.wrapPassword, WRAP_BYTES);
       const wrapPhrase = decodeFixedLength(body.wrapPhrase, WRAP_BYTES);
-      if (!saltPassword || !saltPhrase || !wrapPassword || !wrapPhrase) {
+      if (!saltPhrase || !wrapPhrase) {
         set.status = 400;
         return { error: "Malformed vault payload." };
       }
 
+      // The recovery phrase is always there. Besides it, a vault needs a
+      // password, a passkey, or both: with neither, every unlock would
+      // mean typing twelve words.
+      const hasPassword = body.saltPassword !== undefined || body.wrapPassword !== undefined;
+      const saltPassword = hasPassword ? decodeFixedLength(body.saltPassword ?? "", SALT_BYTES) : null;
+      const wrapPassword = hasPassword ? decodeFixedLength(body.wrapPassword ?? "", WRAP_BYTES) : null;
+      if (hasPassword && (!saltPassword || !wrapPassword)) {
+        set.status = 400;
+        return { error: "Malformed vault payload." };
+      }
+
+      let passkey: { authenticatorId: string; prfSalt: Uint8Array; wrap: Uint8Array } | undefined;
+      if (body.passkey) {
+        const prfSalt = decodeFixedLength(body.passkey.prfSalt, PRF_SALT_BYTES);
+        const wrap = decodeFixedLength(body.passkey.wrap, WRAP_BYTES);
+        if (!prfSalt || !wrap || !/^[A-Za-z0-9_-]{21}$/.test(body.passkey.authenticatorId)) {
+          set.status = 400;
+          return { error: "Malformed vault payload." };
+        }
+        passkey = { authenticatorId: body.passkey.authenticatorId, prfSalt, wrap };
+      }
+      if (!hasPassword && !passkey) {
+        set.status = 400;
+        return { error: "A vault needs a password or a passkey." };
+      }
+
       const result = await createUserVault(me.id, {
-        saltPassword,
+        ...(saltPassword && wrapPassword ? { saltPassword, wrapPassword } : {}),
         saltPhrase,
-        wrapPassword,
         wrapPhrase,
         kdfVersion: body.kdfVersion,
+        passkey,
       });
+      if (!result.ok && result.reason === "not_your_passkey") {
+        set.status = 404;
+        return { error: "Passkey not found." };
+      }
       if (!result.ok) {
         // Setup is one-shot. Subsequent attempts must go through change-password
         // or regenerate-phrase. 409 is the honest status here.
@@ -163,10 +193,17 @@ export const vaultRoutes = new Elysia({ prefix: "/api/me/vault" })
     {
       body: t.Object({
         kdfVersion: t.Integer({ minimum: 1, maximum: 1000 }),
-        saltPassword: t.String({ maxLength: 64 }),
+        saltPassword: t.Optional(t.String({ maxLength: 64 })),
         saltPhrase: t.String({ maxLength: 64 }),
-        wrapPassword: t.String({ maxLength: 128 }),
+        wrapPassword: t.Optional(t.String({ maxLength: 128 })),
         wrapPhrase: t.String({ maxLength: 128 }),
+        passkey: t.Optional(
+          t.Object({
+            authenticatorId: t.String({ maxLength: 21 }),
+            prfSalt: t.String({ maxLength: 64 }),
+            wrap: t.String({ maxLength: 128 }),
+          }),
+        ),
       }),
     },
   )
