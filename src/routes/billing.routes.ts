@@ -17,7 +17,8 @@ import {
 } from "../services/polar.service";
 
 // Polar `subscription.status` values that map to "user is currently
-// Pro". `canceled` is terminal; everything else keeps Pro caps.
+// Pro". A subscription cancelled at period end stays `active` until the
+// period runs out, so it keeps Pro caps until then.
 const PRO_STATUSES = new Set(["active", "past_due", "trialing"]);
 function tierFromStatus(status: string): "free" | "pro" {
   return PRO_STATUSES.has(status) ? "pro" : "free";
@@ -38,127 +39,164 @@ interface PolarSubscriptionData {
   };
 }
 
+// When Polar says the event happened. A payload without a usable
+// timestamp sorts as the oldest possible event, so it can create a
+// subscription but can never overwrite state we already hold.
+function eventTime(raw: unknown): Date {
+  const parsed = raw instanceof Date ? raw : typeof raw === "string" ? new Date(raw) : null;
+  return parsed && !Number.isNaN(parsed.getTime()) ? parsed : new Date(0);
+}
+
 interface HandlerResult {
   ok: boolean;
   reason?: string;
   subscriptionId?: string;
 }
 
+function toDate(value: Date | string): Date {
+  return typeof value === "string" ? new Date(value) : value;
+}
+
+// Both handlers run in a transaction that first locks the user row, so
+// two deliveries for the same user are applied one after the other and
+// the subscription row and users.tier can never disagree. `updatedAt`
+// holds the time of the newest event applied, on both paths.
+
 // Single upsert path for every "subscription is currently in state X"
 // event. `subscription.created`, `.updated`, `.active`, `.past_due`,
-// `.uncanceled` all funnel through here. `.canceled` and `.revoked`
-// route through `applyTerminalCancel` instead because they set
-// canceled_at and flip tier to 'free' regardless of status string.
-async function applySubscriptionState(data: PolarSubscriptionData): Promise<HandlerResult> {
+// `.canceled` and `.uncanceled` all funnel through here. `.canceled`
+// only schedules the end: the customer keeps what they paid for until
+// `.revoked` arrives, which routes through `applyTerminalCancel`, sets
+// canceled_at and flips tier to 'free' regardless of status string.
+async function applySubscriptionState(
+  data: PolarSubscriptionData,
+  eventAt: Date,
+): Promise<HandlerResult> {
   const externalId = data.customer.externalId;
   if (!externalId) {
     console.warn(`[billing] event for ${data.id} has no externalCustomerId, skipping`);
     return { ok: false, reason: "no external id" };
   }
 
-  const [user] = await db.select().from(users).where(eq(users.id, externalId));
-  if (!user) {
-    console.warn(`[billing] event for ${data.id} references unknown user ${externalId}`);
-    return { ok: false, reason: "user not found" };
-  }
+  return db.transaction(async (tx) => {
+    const [user] = await tx.select().from(users).where(eq(users.id, externalId)).for("update");
+    if (!user) {
+      console.warn(`[billing] event for ${data.id} references unknown user ${externalId}`);
+      return { ok: false, reason: "user not found" };
+    }
 
-  const periodEnd =
-    typeof data.currentPeriodEnd === "string"
-      ? new Date(data.currentPeriodEnd)
-      : data.currentPeriodEnd;
+    const [existing] = await tx
+      .select({
+        id: subscriptions.id,
+        updatedAt: subscriptions.updatedAt,
+        canceledAt: subscriptions.canceledAt,
+      })
+      .from(subscriptions)
+      .where(eq(subscriptions.polarSubscriptionId, data.id));
 
-  const now = new Date();
-  const [existing] = await db
-    .select({ id: subscriptions.id })
-    .from(subscriptions)
-    .where(eq(subscriptions.polarSubscriptionId, data.id));
+    // Deliveries can arrive late or be retried out of order. Anything
+    // older than what we hold, and anything for a subscription that has
+    // already ended, is dropped rather than allowed to hand the plan back.
+    if (existing && (existing.canceledAt || eventAt < existing.updatedAt)) {
+      return { ok: true, reason: "stale event ignored", subscriptionId: existing.id };
+    }
 
-  let subscriptionId: string;
-  if (existing) {
-    await db
-      .update(subscriptions)
-      .set({
+    const periodEnd = toDate(data.currentPeriodEnd);
+    let subscriptionId: string;
+    if (existing) {
+      await tx
+        .update(subscriptions)
+        .set({
+          status: data.status,
+          currentPeriodEnd: periodEnd,
+          cancelAtPeriodEnd: data.cancelAtPeriodEnd,
+          updatedAt: eventAt,
+        })
+        .where(eq(subscriptions.id, existing.id));
+      subscriptionId = existing.id;
+    } else {
+      subscriptionId = nanoid();
+      await tx.insert(subscriptions).values({
+        id: subscriptionId,
+        userId: user.id,
+        polarSubscriptionId: data.id,
         status: data.status,
         currentPeriodEnd: periodEnd,
         cancelAtPeriodEnd: data.cancelAtPeriodEnd,
-        updatedAt: now,
+        createdAt: eventAt,
+        updatedAt: eventAt,
+      });
+    }
+
+    // Sync the user's tier and persist the customer ID on first sight.
+    // polarCustomerId is set-once.
+    await tx
+      .update(users)
+      .set({
+        tier: tierFromStatus(data.status),
+        ...(user.polarCustomerId ? {} : { polarCustomerId: data.customerId }),
       })
-      .where(eq(subscriptions.id, existing.id));
-    subscriptionId = existing.id;
-  } else {
-    subscriptionId = nanoid();
-    await db.insert(subscriptions).values({
-      id: subscriptionId,
-      userId: user.id,
-      polarSubscriptionId: data.id,
-      status: data.status,
-      currentPeriodEnd: periodEnd,
-      cancelAtPeriodEnd: data.cancelAtPeriodEnd,
-      createdAt: now,
-      updatedAt: now,
-    });
-  }
+      .where(eq(users.id, user.id));
 
-  // Sync the user's tier and persist the customer ID on first sight.
-  // polarCustomerId is set-once.
-  await db
-    .update(users)
-    .set({
-      tier: tierFromStatus(data.status),
-      ...(user.polarCustomerId ? {} : { polarCustomerId: data.customerId }),
-    })
-    .where(eq(users.id, user.id));
-
-  return { ok: true, subscriptionId };
+    return { ok: true, subscriptionId };
+  });
 }
 
-// Terminal cancel — row is closed out, user drops to Free.
-async function applyTerminalCancel(data: PolarSubscriptionData): Promise<HandlerResult> {
+// Terminal cancel: row is closed out, user drops to Free. Always
+// applied, since nothing can follow it on the same subscription.
+async function applyTerminalCancel(
+  data: PolarSubscriptionData,
+  eventAt: Date,
+): Promise<HandlerResult> {
   const externalId = data.customer.externalId;
   if (!externalId) {
     return { ok: false, reason: "no external id" };
   }
 
-  const now = new Date();
-  const [existing] = await db
-    .select({ id: subscriptions.id, userId: subscriptions.userId })
-    .from(subscriptions)
-    .where(eq(subscriptions.polarSubscriptionId, data.id));
+  // A cancel is always applied, so an unusable timestamp is recorded as now.
+  const at = eventAt.getTime() === 0 ? new Date() : eventAt;
 
-  if (!existing) {
-    // Never saw the create event — insert a row in terminal state so
-    // the audit trail isn't a gap.
-    const subscriptionId = nanoid();
-    await db.insert(subscriptions).values({
-      id: subscriptionId,
-      userId: externalId,
-      polarSubscriptionId: data.id,
-      status: data.status,
-      currentPeriodEnd:
-        typeof data.currentPeriodEnd === "string"
-          ? new Date(data.currentPeriodEnd)
-          : data.currentPeriodEnd,
-      cancelAtPeriodEnd: data.cancelAtPeriodEnd,
-      createdAt: now,
-      updatedAt: now,
-      canceledAt: now,
-    });
-    await db.update(users).set({ tier: "free" }).where(eq(users.id, externalId));
-    return { ok: true, subscriptionId };
-  }
+  return db.transaction(async (tx) => {
+    await tx.select({ id: users.id }).from(users).where(eq(users.id, externalId)).for("update");
 
-  await db
-    .update(subscriptions)
-    .set({
-      status: data.status,
-      cancelAtPeriodEnd: data.cancelAtPeriodEnd,
-      updatedAt: now,
-      canceledAt: now,
-    })
-    .where(eq(subscriptions.id, existing.id));
+    const [existing] = await tx
+      .select({ id: subscriptions.id, userId: subscriptions.userId })
+      .from(subscriptions)
+      .where(eq(subscriptions.polarSubscriptionId, data.id));
 
-  await db.update(users).set({ tier: "free" }).where(eq(users.id, existing.userId));
-  return { ok: true, subscriptionId: existing.id };
+    if (!existing) {
+      // Never saw the create event: insert a row in terminal state so
+      // the audit trail isn't a gap. An unknown user fails the FK here,
+      // which rolls back and lets Polar retry.
+      const subscriptionId = nanoid();
+      await tx.insert(subscriptions).values({
+        id: subscriptionId,
+        userId: externalId,
+        polarSubscriptionId: data.id,
+        status: data.status,
+        currentPeriodEnd: toDate(data.currentPeriodEnd),
+        cancelAtPeriodEnd: data.cancelAtPeriodEnd,
+        createdAt: at,
+        updatedAt: at,
+        canceledAt: at,
+      });
+      await tx.update(users).set({ tier: "free" }).where(eq(users.id, externalId));
+      return { ok: true, subscriptionId };
+    }
+
+    await tx
+      .update(subscriptions)
+      .set({
+        status: data.status,
+        cancelAtPeriodEnd: data.cancelAtPeriodEnd,
+        updatedAt: at,
+        canceledAt: at,
+      })
+      .where(eq(subscriptions.id, existing.id));
+
+    await tx.update(users).set({ tier: "free" }).where(eq(users.id, existing.userId));
+    return { ok: true, subscriptionId: existing.id };
+  });
 }
 
 export const billingRoutes = new Elysia({ prefix: "/api/billing" })
@@ -271,7 +309,7 @@ export const billingRoutes = new Elysia({ prefix: "/api/billing" })
         return { error: "Malformed webhook payload" };
       }
 
-      const eventRowId = nanoid();
+      let eventRowId = nanoid();
       try {
         await db.insert(billingEvents).values({
           id: eventRowId,
@@ -280,10 +318,23 @@ export const billingRoutes = new Elysia({ prefix: "/api/billing" })
           rawPayload: event as unknown as Record<string, unknown>,
         });
       } catch {
-        // UNIQUE violation on polar_event_id = already processed.
-        // Return 200 so Polar stops retrying.
-        console.warn("[billing] duplicate webhook delivery, skipping:", event.type);
-        return { ok: true, deduplicated: true };
+        // UNIQUE violation on polar_event_id: we have seen this delivery.
+        // Only a delivery whose handler finished is a duplicate. One that
+        // failed must run again, or a cancellation or refund that hit a
+        // transient error would be acknowledged and never applied.
+        const [seen] = await db
+          .select({ id: billingEvents.id, processedAt: billingEvents.processedAt })
+          .from(billingEvents)
+          .where(eq(billingEvents.polarEventId, polarEventId));
+        if (!seen) {
+          set.status = 500;
+          return { error: "Could not record the event" };
+        }
+        if (seen.processedAt) {
+          console.warn("[billing] duplicate webhook delivery, skipping:", event.type);
+          return { ok: true, deduplicated: true };
+        }
+        eventRowId = seen.id;
       }
 
       // Unknown event types are audited but otherwise ignored, so
@@ -294,13 +345,19 @@ export const billingRoutes = new Elysia({ prefix: "/api/billing" })
           case "subscription.created":
           case "subscription.active":
           case "subscription.updated":
+          case "subscription.canceled":
           case "subscription.uncanceled":
           case "subscription.past_due":
-            result = await applySubscriptionState(event.data as unknown as PolarSubscriptionData);
+            result = await applySubscriptionState(
+              event.data as unknown as PolarSubscriptionData,
+              eventTime((event as { timestamp?: unknown }).timestamp),
+            );
             break;
-          case "subscription.canceled":
           case "subscription.revoked":
-            result = await applyTerminalCancel(event.data as unknown as PolarSubscriptionData);
+            result = await applyTerminalCancel(
+              event.data as unknown as PolarSubscriptionData,
+              eventTime((event as { timestamp?: unknown }).timestamp),
+            );
             break;
           default:
             result = { ok: true, reason: "ignored event type" };

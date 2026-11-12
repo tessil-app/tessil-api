@@ -26,8 +26,10 @@ const BUCKET_NAME = env.R2_BUCKET_NAME;
 // multi-GiB upload before the signature expires (1 MB/s on a 10 GiB
 // upload ≈ 2.8 h). PUT URLs are write-only and bound to
 // (key, content-length).
-const UPLOAD_URL_EXPIRY = 4 * 60 * 60;
-const DOWNLOAD_URL_EXPIRY = 15 * 60;
+export const UPLOAD_URL_EXPIRY = 4 * 60 * 60;
+// A streamed download issues ranged GETs against one URL for the whole
+// file, so the URL has to outlive a large download on a slow line.
+const DOWNLOAD_URL_EXPIRY = 4 * 60 * 60;
 
 export interface PresignedDownloadUrl {
   url: string;
@@ -57,21 +59,23 @@ export async function headObject(key: string): Promise<{ size: number } | null> 
 }
 
 /**
- * Generate a presigned URL for downloading a file from R2
+ * Generate a presigned URL for downloading a file from R2. `notAfter`
+ * is the transfer's expiry: the URL never outlives the transfer.
  */
 export async function getPresignedDownloadUrl(
-  key: string
+  key: string,
+  notAfter: Date,
 ): Promise<PresignedDownloadUrl> {
   const command = new GetObjectCommand({
     Bucket: BUCKET_NAME,
     Key: key,
   });
 
-  const url = await getSignedUrl(r2Client, command, {
-    expiresIn: DOWNLOAD_URL_EXPIRY,
-  });
+  const untilTransferExpires = Math.floor((notAfter.getTime() - Date.now()) / 1000);
+  const expiresIn = Math.max(1, Math.min(DOWNLOAD_URL_EXPIRY, untilTransferExpires));
+  const url = await getSignedUrl(r2Client, command, { expiresIn });
 
-  const expiresAt = new Date(Date.now() + DOWNLOAD_URL_EXPIRY * 1000);
+  const expiresAt = new Date(Date.now() + expiresIn * 1000);
 
   return { url, expiresAt };
 }

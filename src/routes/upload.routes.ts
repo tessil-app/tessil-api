@@ -1,7 +1,6 @@
 import { Elysia, t } from 'elysia';
-import { createTransfer, completeTransfer, abortTransfer, logCompletedTransfer, createFile, deleteFileById, getFileById, getTransferTotalSize, getValidTransfer, getTransferById, getFilesByTransferId } from '../services/file.service';
+import { createTransfer, completeTransfer, abortTransfer, logCompletedTransfer, createFile, deleteFileById, getFileById, getTransferTotalSize, getValidTransfer, getTransferById, getFilesByTransferId, removeStoredFiles, setFileUploadId } from '../services/file.service';
 import {
-  abortMultipartUpload,
   completeMultipartUpload,
   headObject,
   initMultipartUpload,
@@ -164,6 +163,10 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       set.status = 404;
       return { error: 'Transfer not found or has expired' };
     }
+    if (transfer.isCompleted) {
+      set.status = 409;
+      return { error: 'Transfer is already completed' };
+    }
 
     // Tier-aware file size cap.
     if (size > caps.maxFileSize) {
@@ -217,6 +220,7 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
 
     try {
       const { uploadId, partUrls } = await initMultipartUpload(file.r2Key, size);
+      await setFileUploadId(file.id, uploadId);
       return {
         fileId: file.id,
         r2Key: file.r2Key,
@@ -235,11 +239,12 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
   }, {
     body: t.Object({
       transferId: t.String({ minLength: 21, maxLength: 21 }),
-      contentType: t.String(),
-      encryptedName: t.String(),
-      encryptedNameIv: t.String(),
-      fileIv: t.String(),
-      size: t.Number(),
+      contentType: t.String({ maxLength: 127 }),
+      encryptedName: t.String({ minLength: 1, maxLength: 1024 }),
+      encryptedNameIv: t.String({ minLength: 1, maxLength: 32 }),
+      fileIv: t.String({ minLength: 1, maxLength: 32 }),
+      // A negative or fractional size would lower the totals it is added to.
+      size: t.Integer({ minimum: 1 }),
     }),
   })
 
@@ -263,6 +268,10 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       set.status = 404;
       return { error: 'Transfer not found or has expired' };
     }
+    if (transfer.isCompleted) {
+      set.status = 409;
+      return { error: 'Transfer is already completed' };
+    }
 
     const file = await getFileById(fileId);
     if (!file || file.transferId !== transferId) {
@@ -276,7 +285,8 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
     }
 
     try {
-      await completeMultipartUpload(file.r2Key, uploadId, parts);
+      await completeMultipartUpload(file.r2Key, file.uploadId ?? uploadId, parts);
+      await setFileUploadId(file.id, null);
       return { fileId: file.id, size: file.size };
     } catch (err) {
       console.error('[upload] completeMultipartUpload failed:', err);
@@ -298,10 +308,9 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
     }),
   })
 
-  // Abort a single file's in-flight multipart upload. Tears down the
-  // R2 multipart upload (if it still exists), releases the monthly
-  // volume reservation, and deletes the file row. Idempotent —
-  // duplicate aborts and aborts of already-completed uploads no-op.
+  // Abort a single file's upload. Tears down the multipart upload and
+  // any object it already produced, releases the monthly volume
+  // reservation, and deletes the file row. Idempotent.
   .post('/abort-multipart', async ({ body, ipContext, me, set }) => {
     const { transferId, fileId, uploadId } = body;
 
@@ -319,6 +328,10 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       set.status = 404;
       return { error: 'Transfer not found or has expired' };
     }
+    if (transfer.isCompleted) {
+      set.status = 409;
+      return { error: 'Transfer is already completed' };
+    }
 
     const file = await getFileById(fileId);
     if (!file || file.transferId !== transferId) {
@@ -328,14 +341,13 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       return null;
     }
 
-    // Best-effort R2 abort. If it fails the lifecycle rule will catch
-    // the orphaned upload within 7 days (per the runbook); meanwhile
-    // we proceed with the DB + volume cleanup so the user's state is
-    // consistent.
-    try {
-      await abortMultipartUpload(file.r2Key, uploadId);
-    } catch (err) {
-      console.error('[upload] abortMultipartUpload failed (will rely on lifecycle rule):', err);
+    // The row is the only record of the storage key. Keep it, and the
+    // volume reservation, until storage confirms the bytes are gone;
+    // the abandoned sweep retries whatever is left.
+    const removed = await removeStoredFiles([{ ...file, uploadId: file.uploadId ?? uploadId }]);
+    if (!removed) {
+      set.status = 502;
+      return { error: 'Could not remove the upload. It will be cleaned up automatically.' };
     }
 
     // Release the monthly volume reservation made at init.
@@ -380,6 +392,12 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       return { error: 'Transfer not found or has expired' };
     }
 
+    // A sender whose first response was lost retries; answer the same
+    // way without touching the transfer again.
+    if (transfer.isCompleted) {
+      return { success: true, shareUrl: `/d/${transferId}` };
+    }
+
     // Vault wrap: K_transfer wrapped under the user's K_vault.
     // Anonymous transfers cannot vault; signed-in owners may. The wrap
     // blob is opaque to the server — only its byte count is validated.
@@ -418,7 +436,13 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       }
     }
 
-    await completeTransfer(transferId, vaultWrap);
+    // Conditional on the file set checked above, so a file added while
+    // the checks ran cannot ride into a live transfer unverified.
+    const completed = await completeTransfer(transferId, vaultWrap, transferFiles.length);
+    if (!completed) {
+      set.status = 409;
+      return { error: 'Transfer changed while completing. Please retry.' };
+    }
     logCompletedTransfer(transfer).catch(() => {}); // fire-and-forget, never blocks response
 
     return {
@@ -459,7 +483,10 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       return { error: 'Transfer is already completed' };
     }
 
-    await abortTransfer(transferId);
+    if (!(await abortTransfer(transferId))) {
+      set.status = 502;
+      return { error: 'Could not remove the upload. It will be cleaned up automatically.' };
+    }
     return { success: true };
   }, {
     body: t.Object({

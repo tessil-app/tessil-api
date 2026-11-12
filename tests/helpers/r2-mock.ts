@@ -12,9 +12,9 @@ const MULTIPART_PART_SIZE = 10 * 1024 * 1024;
 
 export function defaultR2Mock() {
   return {
-    getPresignedDownloadUrl: async (key: string) => ({
+    getPresignedDownloadUrl: async (key: string, notAfter: Date) => ({
       url: `https://r2.test.invalid/${key}`,
-      expiresAt: new Date(Date.now() + 15 * 60_000),
+      expiresAt: new Date(Math.min(Date.now() + 4 * 60 * 60_000, notAfter.getTime())),
     }),
     deleteFromR2: async () => undefined,
     headObject: async (key: string) => {
@@ -31,6 +31,7 @@ export function defaultR2Mock() {
     // Multipart stubs (ADR-0009). The mocked uploadId is deterministic
     // so tests can assert against it without snapshotting random values.
     MULTIPART_PART_SIZE,
+    UPLOAD_URL_EXPIRY: 4 * 60 * 60,
     initMultipartUpload: async (key: string, totalBytes: number) => {
       const partCount = Math.max(1, Math.ceil(totalBytes / MULTIPART_PART_SIZE));
       const partUrls = Array.from({ length: partCount }, (_, i) => {

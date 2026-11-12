@@ -11,6 +11,7 @@ import {
   files,
   magicLinkTokens,
   sessions,
+  subscriptions,
   transfers,
   users,
   type User,
@@ -57,31 +58,69 @@ interface EraseAccountInput {
   user: User;
   ipContext: IpContext;
   userAgent: string | null;
+  // Overridable so tests need no payment-processor client.
+  cancelSubscription?: (polarSubscriptionId: string) => Promise<void>;
 }
 
-// Permanent account erasure. Owned transfers + R2 objects are
-// purged first (best-effort, outside the DB transaction); then a
-// single DB transaction handles all row-level operations atomically.
-export async function eraseAccount({ user, ipContext, userAgent }: EraseAccountInput): Promise<void> {
-  // Step 2: purge owned, not-already-soft-deleted transfers.
-  const owned = await db
-    .select()
-    .from(transfers)
-    .where(and(eq(transfers.userId, user.id), eq(transfers.isDeleted, false)));
+async function cancelAtProcessor(polarSubscriptionId: string): Promise<void> {
+  const { cancelSubscriptionImmediately } = await import("../services/polar.service");
+  await cancelSubscriptionImmediately(polarSubscriptionId);
+}
+
+// Permanent account erasure. Billing is stopped first, then owned
+// transfers + R2 objects are purged (best-effort, outside the DB
+// transaction); then a single DB transaction handles all row-level
+// operations atomically.
+export async function eraseAccount({
+  user,
+  ipContext,
+  userAgent,
+  cancelSubscription = cancelAtProcessor,
+}: EraseAccountInput): Promise<void> {
+  // Step 1: stop billing. Runs before anything is destroyed, so a
+  // processor failure aborts the erasure with the account intact
+  // instead of leaving a deleted user who is still charged.
+  const live = await db
+    .select({ polarSubscriptionId: subscriptions.polarSubscriptionId })
+    .from(subscriptions)
+    .where(
+      and(
+        eq(subscriptions.userId, user.id),
+        inArray(subscriptions.status, ["active", "past_due", "trialing"]),
+      ),
+    );
+  for (const subscription of live) {
+    await cancelSubscription(subscription.polarSubscriptionId);
+  }
+
+  // Step 2: purge every owned transfer, soft-deleted ones included.
+  const owned = await db.select().from(transfers).where(eq(transfers.userId, user.id));
 
   for (const transfer of owned) {
     try {
       await purgeOwnerDeletedTransfer(transfer);
     } catch (err) {
       console.error(`[erasure] purgeOwnerDeletedTransfer failed for ${transfer.id}:`, err);
-      // Continue cascade — the periodic cleanup job will eventually pick up
-      // any remaining soft-deleted rows (purge marks isDeleted; if marking
-      // succeeded but R2 cleanup failed, the cleanup job retries the R2 side).
     }
   }
 
   // Steps 3–9: DB-only cascade in a single transaction.
   await db.transaction(async (tx) => {
+    // Step 3: a transfer whose storage could not be cleared survives
+    // step 2. Detach it from the user and strip what the user wrote,
+    // so the account can go now and the sweep finishes the storage.
+    await tx
+      .update(transfers)
+      .set({
+        userId: null,
+        isDeleted: true,
+        wrappedKey: null,
+        encryptedTitle: null,
+        encryptedTitleIv: null,
+        passwordHash: null,
+      })
+      .where(eq(transfers.userId, user.id));
+
     // Step 4: hard-delete magic-link tokens for this email (any purpose).
     await tx.delete(magicLinkTokens).where(eq(magicLinkTokens.email, user.email));
 

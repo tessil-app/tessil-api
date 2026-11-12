@@ -66,6 +66,13 @@ async function backdateCreatedAt(transferId: string, minutesAgo: number) {
     .where(eq(transfers.id, transferId));
 }
 
+async function backdateFileCreatedAt(fileId: string, minutesAgo: number) {
+  await db
+    .update(files)
+    .set({ createdAt: new Date(Date.now() - minutesAgo * 60_000) })
+    .where(eq(files.id, fileId));
+}
+
 async function rowExists(transferId: string): Promise<boolean> {
   const rows = await db.select({ id: transfers.id }).from(transfers).where(eq(transfers.id, transferId));
   return rows.length > 0;
@@ -149,15 +156,63 @@ describe("cleanupExpiredTransfers", () => {
 // ─── 2. Abandoned uploads ───────────────────────────────────────────────────
 
 describe("cleanupAbandonedTransfers", () => {
-  it("removes an incomplete transfer older than the 30 minute cutoff", async () => {
+  it("removes an incomplete transfer with no files after the 30 minute cutoff", async () => {
     const transfer = await createTransfer(24);
-    await seedFile(transfer.id);
     await backdateCreatedAt(transfer.id, 45);
 
     const count = await cleanupAbandonedTransfers();
 
     expect(count).toBe(1);
     expect(await rowExists(transfer.id)).toBe(false);
+  });
+
+  // Upload URLs stay valid for 4 hours, so a large file on a slow line
+  // is still arriving long after the transfer was created.
+  it("spares an old transfer whose upload URLs are still valid", async () => {
+    const transfer = await createTransfer(24);
+    const file = await seedFile(transfer.id);
+    await backdateCreatedAt(transfer.id, 180);
+    await backdateFileCreatedAt(file.id, 170);
+
+    const count = await cleanupAbandonedTransfers();
+
+    expect(count).toBe(0);
+    expect(await rowExists(transfer.id)).toBe(true);
+  });
+
+  it("removes an incomplete transfer once its upload URLs have lapsed", async () => {
+    const transfer = await createTransfer(24);
+    const file = await seedFile(transfer.id);
+    await backdateCreatedAt(transfer.id, 300);
+    await backdateFileCreatedAt(file.id, 290);
+
+    const count = await cleanupAbandonedTransfers();
+
+    expect(count).toBe(1);
+    expect(await rowExists(transfer.id)).toBe(false);
+    expect(deletedKeys).toEqual([file.r2Key]);
+  });
+
+  it("keeps the rows when storage refuses the delete, then retries", async () => {
+    const transfer = await createTransfer(24);
+    await backdateCreatedAt(transfer.id, 45);
+    const file = await seedFile(transfer.id);
+    await backdateFileCreatedAt(file.id, 290);
+    await backdateCreatedAt(transfer.id, 300);
+
+    mock.module("../../src/services/r2.service", () => ({
+      ...defaultR2Mock(),
+      deleteFromR2: async () => {
+        throw new Error("simulated storage outage");
+      },
+    }));
+    expect(await cleanupAbandonedTransfers()).toBe(0);
+    expect(await rowExists(transfer.id)).toBe(true);
+
+    recordingR2Mock();
+    expect(await cleanupAbandonedTransfers()).toBe(1);
+    expect(await rowExists(transfer.id)).toBe(false);
+    expect(deletedKeys).toEqual([file.r2Key]);
   });
 
   it("spares a recent incomplete transfer still mid-upload", async () => {

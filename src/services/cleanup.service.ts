@@ -10,8 +10,7 @@ export async function cleanupExpiredTransfers(): Promise<number> {
 
   for (const transfer of expiredTransfers) {
     try {
-      await deleteExpiredTransfer(transfer);
-      count++;
+      if (await deleteExpiredTransfer(transfer)) count++;
     } catch (error) {
       console.error(`[cleanup] Failed to delete expired transfer ${transfer.id}:`, error);
     }
@@ -26,8 +25,7 @@ export async function cleanupAbandonedTransfers(): Promise<number> {
 
   for (const transfer of abandoned) {
     try {
-      await abortTransfer(transfer.id);
-      count++;
+      if (await abortTransfer(transfer.id)) count++;
     } catch (error) {
       console.error(`[cleanup] Failed to delete abandoned transfer ${transfer.id}:`, error);
     }
@@ -44,8 +42,7 @@ export async function cleanupSoftDeletedTransfers(): Promise<number> {
 
   for (const transfer of rows) {
     try {
-      await purgeOwnerDeletedTransfer(transfer);
-      count++;
+      if (await purgeOwnerDeletedTransfer(transfer)) count++;
     } catch (error) {
       console.error(`[cleanup] Failed to delete soft-deleted transfer ${transfer.id}:`, error);
     }

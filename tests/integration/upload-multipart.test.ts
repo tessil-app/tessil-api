@@ -10,17 +10,18 @@
 // actual R2 are out of scope (covered manually in dev / by the
 // frontend orchestrator's own surface tests).
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 import { eq } from "drizzle-orm";
 import { createApp } from "../../src/app";
 import { db } from "../../src/db";
 import { files, transfers } from "../../src/db/schema";
-import { createTransfer } from "../../src/services/file.service";
+import { completeTransfer, createFile, createTransfer } from "../../src/services/file.service";
 // Resolves to the stub from tests/setup.ts, which mirrors the production value.
 // Deriving the assertions from it stops the test drifting from prod again.
 import { MULTIPART_PART_SIZE } from "../../src/services/r2.service";
 import { authedRequest, createAuthedUser } from "../helpers/auth";
 import { ensureMigrations, resetDb } from "../helpers/db";
+import { defaultR2Mock } from "../helpers/r2-mock";
 
 const APP_URL = process.env.APP_URL!;
 const ORIGIN_HEADER = { Origin: APP_URL, "Content-Type": "application/json" };
@@ -123,6 +124,38 @@ describe("POST /api/upload/init-multipart", () => {
     const [row] = await db.select().from(files).where(eq(files.id, body.fileId));
     expect(row.size).toBe(12345);
     expect(row.transferId).toBe(transfer.id);
+    expect(row.uploadId).toBe(`mock-upload-${row.r2Key}`);
+  });
+
+  // A negative size would lower the transfer total and the monthly
+  // volume counter it is added to.
+  it("rejects a negative, zero or fractional size", async () => {
+    const transfer = await createTransfer(1);
+    for (const size of [-1024, 0, 10.5]) {
+      const res = await app.handle(
+        new Request(`${APP_URL}/api/upload/init-multipart`, jsonBody({
+          transferId: transfer.id,
+          size,
+          ...FILE_FIELDS,
+        })),
+      );
+      expect(res.status).toBe(400);
+    }
+    const rows = await db.select().from(files).where(eq(files.transferId, transfer.id));
+    expect(rows).toHaveLength(0);
+  });
+
+  it("rejects an encrypted name longer than the column", async () => {
+    const transfer = await createTransfer(1);
+    const res = await app.handle(
+      new Request(`${APP_URL}/api/upload/init-multipart`, jsonBody({
+        transferId: transfer.id,
+        size: 1024,
+        ...FILE_FIELDS,
+        encryptedName: "x".repeat(1025),
+      })),
+    );
+    expect(res.status).toBe(400);
   });
 });
 
@@ -275,5 +308,151 @@ describe("POST /api/upload/abort-multipart", () => {
       })),
     );
     expect(res.status).toBe(204);
+  });
+});
+
+// Anyone holding a share link knows the transfer and file IDs, so a
+// completed transfer must reject every per-file mutation.
+describe("completed transfers are frozen", () => {
+  it("rejects add, finish and abort, and keeps the file", async () => {
+    const transfer = await createTransfer(1);
+    const file = await createFile({
+      transferId: transfer.id,
+      size: 1024,
+      mimeType: FILE_FIELDS.contentType,
+      encryptedName: FILE_FIELDS.encryptedName,
+      encryptedNameIv: FILE_FIELDS.encryptedNameIv,
+      fileIv: FILE_FIELDS.fileIv,
+    });
+    await completeTransfer(transfer.id);
+
+    const call = (path: string, body: object) =>
+      app.handle(new Request(`${APP_URL}/api/upload/${path}`, jsonBody(body)));
+
+    const abort = await call("abort-multipart", {
+      transferId: transfer.id,
+      fileId: file.id,
+      uploadId: "any",
+    });
+    expect(abort.status).toBe(409);
+
+    const finish = await call("complete-multipart", {
+      transferId: transfer.id,
+      fileId: file.id,
+      uploadId: "any",
+      parts: [{ partNumber: 1, etag: "etag" }],
+    });
+    expect(finish.status).toBe(409);
+
+    const add = await call("init-multipart", {
+      transferId: transfer.id,
+      size: 1024,
+      ...FILE_FIELDS,
+    });
+    expect(add.status).toBe(409);
+
+    const left = await db.select().from(files).where(eq(files.transferId, transfer.id));
+    expect(left).toHaveLength(1);
+  });
+});
+
+// ─── storage on abort ───────────────────────────────────────────────────────
+
+describe("POST /api/upload/abort-multipart storage handling", () => {
+  afterEach(() => {
+    mock.module("../../src/services/r2.service", () => defaultR2Mock());
+  });
+
+  async function initFile(transferId: string) {
+    return app
+      .handle(
+        new Request(`${APP_URL}/api/upload/init-multipart`, jsonBody({
+          transferId,
+          size: 1024,
+          ...FILE_FIELDS,
+        })),
+      )
+      .then((r) => r.json()) as Promise<{ fileId: string; uploadId: string; r2Key: string }>;
+  }
+
+  // The upload may already have been stitched into an object, so abort
+  // has to delete the object as well as the multipart upload.
+  it("deletes the object and uses the stored upload ID", async () => {
+    const aborted: string[] = [];
+    const deleted: string[] = [];
+    mock.module("../../src/services/r2.service", () => ({
+      ...defaultR2Mock(),
+      abortMultipartUpload: async (_key: string, uploadId: string) => {
+        aborted.push(uploadId);
+      },
+      deleteFromR2: async (key: string) => {
+        deleted.push(key);
+      },
+    }));
+
+    const transfer = await createTransfer(1);
+    const init = await initFile(transfer.id);
+
+    const res = await app.handle(
+      new Request(`${APP_URL}/api/upload/abort-multipart`, jsonBody({
+        transferId: transfer.id,
+        fileId: init.fileId,
+        uploadId: "made-up-by-the-client",
+      })),
+    );
+    expect(res.status).toBe(204);
+    expect(aborted).toEqual([init.uploadId]);
+    expect(deleted).toEqual([init.r2Key]);
+  });
+
+  it("keeps the file row when storage refuses the delete", async () => {
+    mock.module("../../src/services/r2.service", () => ({
+      ...defaultR2Mock(),
+      deleteFromR2: async () => {
+        throw new Error("simulated storage outage");
+      },
+    }));
+
+    const transfer = await createTransfer(1);
+    const init = await initFile(transfer.id);
+
+    const res = await app.handle(
+      new Request(`${APP_URL}/api/upload/abort-multipart`, jsonBody({
+        transferId: transfer.id,
+        fileId: init.fileId,
+        uploadId: init.uploadId,
+      })),
+    );
+    expect(res.status).toBe(502);
+    const rows = await db.select().from(files).where(eq(files.id, init.fileId));
+    expect(rows).toHaveLength(1);
+  });
+});
+
+// ─── complete ───────────────────────────────────────────────────────────────
+
+describe("POST /api/upload/complete", () => {
+  // A sender whose first response was lost retries the call.
+  it("answers a repeat call the same way without changing the transfer", async () => {
+    const transfer = await createTransfer(1);
+    await createFile({
+      transferId: transfer.id,
+      size: 1024,
+      mimeType: FILE_FIELDS.contentType,
+      encryptedName: FILE_FIELDS.encryptedName,
+      encryptedNameIv: FILE_FIELDS.encryptedNameIv,
+      fileIv: FILE_FIELDS.fileIv,
+    });
+
+    const complete = () =>
+      app.handle(
+        new Request(`${APP_URL}/api/upload/complete`, jsonBody({ transferId: transfer.id })),
+      );
+
+    const first = await complete();
+    expect(first.status).toBe(200);
+    const second = await complete();
+    expect(second.status).toBe(200);
+    expect(await second.json()).toEqual({ success: true, shareUrl: `/d/${transfer.id}` });
   });
 });
