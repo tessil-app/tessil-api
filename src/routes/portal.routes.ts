@@ -139,7 +139,7 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
     {
       body: t.Object({
         id: t.String({ minLength: 21, maxLength: 21 }),
-        publicBundle: t.String({ maxLength: 4096 }),
+        publicBundle: t.String({ maxLength: 12000 }),
         sealedKeys: t.String({ maxLength: 2048 }),
         depositToken: t.String({ maxLength: 64 }),
       }),
@@ -215,7 +215,7 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
       params: t.Object({ id: t.String() }),
       body: t.Object({
         isDisabled: t.Optional(t.Boolean()),
-        publicBundle: t.Optional(t.String({ maxLength: 4096 })),
+        publicBundle: t.Optional(t.String({ maxLength: 12000 })),
       }),
     },
   )
