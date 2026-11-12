@@ -188,6 +188,21 @@ describe("GET /api/download/file/:id/url — atomic claim wiring", () => {
     expect(await readDownloadCount(transfer.id)).toBe(1);
   });
 
+  it("never hands out a URL that outlives the transfer", async () => {
+    const { transfer, file } = await seedCompletedTransfer();
+    const expiresAt = new Date(Date.now() + 10 * 60_000);
+    await db.update(transfers).set({ expiresAt }).where(eq(transfers.id, transfer.id));
+
+    const res = await app.handle(
+      new Request(`${APP_URL}/api/download/file/${file.id}/url`, {
+        headers: { ...ORIGIN_HEADER, "cf-connecting-ip": "203.0.113.15" },
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { expiresAt: string };
+    expect(new Date(body.expiresAt).getTime()).toBeLessThanOrEqual(expiresAt.getTime());
+  });
+
   it("returns 404 on a soft-deleted transfer without revealing existence", async () => {
     const { transfer, file } = await seedCompletedTransfer();
     await markTransferAsDeleted(transfer.id);

@@ -182,8 +182,11 @@ export const downloadRoutes = new Elysia({ prefix: '/api/download' })
     // under DOWNLOAD_TOKEN_SECRET, so it cannot be replayed across
     // transfers.
     const transferRow = await getTransferById(file.transferId);
+    if (!transferRow) {
+      set.status = 404;
+      return { error: 'Transfer has expired' };
+    }
     const isLiveProtected =
-      transferRow !== null &&
       transferRow.isCompleted &&
       new Date(transferRow.expiresAt) > new Date() &&
       transferRow.passwordHash !== null;
@@ -207,7 +210,7 @@ export const downloadRoutes = new Elysia({ prefix: '/api/download' })
       return { error: 'Transfer has expired' };
     }
 
-    const presigned = await getPresignedDownloadUrl(file.r2Key);
+    const presigned = await getPresignedDownloadUrl(file.r2Key, transferRow.expiresAt);
 
     return {
       downloadUrl: presigned.url,
