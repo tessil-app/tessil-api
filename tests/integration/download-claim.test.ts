@@ -1,6 +1,6 @@
 // Atomic download-slot claim. See docs/audit/25-external-audit-findings.md §B.1.
 //
-// `claimDownloadSlot` collapses (expired / deleted / not completed / cap
+// `claimDownloadSlot` takes a file ID and collapses (expired / deleted / not completed / cap
 // reached) into a single null return so the route layer can map all four to
 // the same 404 — preserving the existence-oracle policy from doc 20 §4.
 //
@@ -41,19 +41,23 @@ afterAll(async () => {
   await resetDb();
 });
 
-async function seedCompletedTransfer(opts: {
-  maxDownloads?: number | null;
-  expiresInHours?: number;
-} = {}) {
-  const transfer = await createTransfer(opts.expiresInHours ?? 1, undefined, opts.maxDownloads ?? undefined);
-  const file = await createFile({
-    transferId: transfer.id,
+function seedFile(transferId: string) {
+  return createFile({
+    transferId,
     encryptedName: "x".repeat(32),
     encryptedNameIv: "y".repeat(24),
     fileIv: "z".repeat(24),
     size: 1024,
     mimeType: "application/octet-stream",
   });
+}
+
+async function seedCompletedTransfer(opts: {
+  maxDownloads?: number | null;
+  expiresInHours?: number;
+} = {}) {
+  const transfer = await createTransfer(opts.expiresInHours ?? 1, undefined, opts.maxDownloads ?? undefined);
+  const file = await seedFile(transfer.id);
   await completeTransfer(transfer.id);
   return { transfer, file };
 }
@@ -70,42 +74,43 @@ async function readDownloadCount(transferId: string): Promise<number> {
 
 describe("claimDownloadSlot — service-level", () => {
   it("increments once when transfer has no cap", async () => {
-    const { transfer } = await seedCompletedTransfer({ maxDownloads: null });
-    const result = await claimDownloadSlot(transfer.id);
+    const { transfer, file } = await seedCompletedTransfer({ maxDownloads: null });
+    const result = await claimDownloadSlot(file.id);
     expect(result).toBe(1);
     expect(await readDownloadCount(transfer.id)).toBe(1);
   });
 
   it("returns null when the cap is exhausted", async () => {
-    const { transfer } = await seedCompletedTransfer({ maxDownloads: 2 });
-    expect(await claimDownloadSlot(transfer.id)).toBe(1);
-    expect(await claimDownloadSlot(transfer.id)).toBe(2);
-    expect(await claimDownloadSlot(transfer.id)).toBeNull();
+    const { transfer, file } = await seedCompletedTransfer({ maxDownloads: 2 });
+    expect(await claimDownloadSlot(file.id)).toBe(1);
+    expect(await claimDownloadSlot(file.id)).toBe(2);
+    expect(await claimDownloadSlot(file.id)).toBeNull();
     // Counter must not move past the cap.
     expect(await readDownloadCount(transfer.id)).toBe(2);
   });
 
   it("returns null when the transfer is soft-deleted", async () => {
-    const { transfer } = await seedCompletedTransfer();
+    const { transfer, file } = await seedCompletedTransfer();
     await markTransferAsDeleted(transfer.id);
-    expect(await claimDownloadSlot(transfer.id)).toBeNull();
+    expect(await claimDownloadSlot(file.id)).toBeNull();
     expect(await readDownloadCount(transfer.id)).toBe(0);
   });
 
   it("returns null when the transfer is not yet completed", async () => {
     const transfer = await createTransfer(1);
+    const file = await seedFile(transfer.id);
     // No completeTransfer() call — upload still in progress.
-    expect(await claimDownloadSlot(transfer.id)).toBeNull();
+    expect(await claimDownloadSlot(file.id)).toBeNull();
     expect(await readDownloadCount(transfer.id)).toBe(0);
   });
 
   it("returns null when the transfer has expired", async () => {
-    const { transfer } = await seedCompletedTransfer();
+    const { transfer, file } = await seedCompletedTransfer();
     await db
       .update(transfers)
       .set({ expiresAt: new Date(Date.now() - 60_000) })
       .where(eq(transfers.id, transfer.id));
-    expect(await claimDownloadSlot(transfer.id)).toBeNull();
+    expect(await claimDownloadSlot(file.id)).toBeNull();
   });
 
   // The key race: pre-fix, a burst of N concurrent claims on a transfer
@@ -115,10 +120,10 @@ describe("claimDownloadSlot — service-level", () => {
   it("a concurrent burst never overshoots the cap", async () => {
     const CAP = 3;
     const BURST = 20;
-    const { transfer } = await seedCompletedTransfer({ maxDownloads: CAP });
+    const { transfer, file } = await seedCompletedTransfer({ maxDownloads: CAP });
 
     const results = await Promise.all(
-      Array.from({ length: BURST }, () => claimDownloadSlot(transfer.id)),
+      Array.from({ length: BURST }, () => claimDownloadSlot(file.id)),
     );
 
     const successes = results.filter((r) => r !== null).length;
@@ -127,6 +132,37 @@ describe("claimDownloadSlot — service-level", () => {
     expect(successes).toBe(CAP);
     expect(failures).toBe(BURST - CAP);
     expect(await readDownloadCount(transfer.id)).toBe(CAP);
+  });
+});
+
+// The cap is per file: one download of a transfer means every file once.
+describe("claimDownloadSlot: transfers with several files", () => {
+  it("lets one recipient fetch every file on a single download", async () => {
+    const transfer = await createTransfer(1, undefined, 1);
+    const first = await seedFile(transfer.id);
+    const second = await seedFile(transfer.id);
+    const third = await seedFile(transfer.id);
+    await completeTransfer(transfer.id);
+
+    // The transfer counts complete downloads, so it stays at 0 until
+    // the last file has gone out.
+    expect(await claimDownloadSlot(first.id)).toBe(0);
+    expect(await claimDownloadSlot(second.id)).toBe(0);
+    expect(await claimDownloadSlot(third.id)).toBe(1);
+
+    expect(await claimDownloadSlot(first.id)).toBeNull();
+    expect(await readDownloadCount(transfer.id)).toBe(1);
+  });
+
+  it("caps each file on its own", async () => {
+    const transfer = await createTransfer(1, undefined, 1);
+    const first = await seedFile(transfer.id);
+    const second = await seedFile(transfer.id);
+    await completeTransfer(transfer.id);
+
+    expect(await claimDownloadSlot(first.id)).toBe(0);
+    expect(await claimDownloadSlot(first.id)).toBeNull();
+    expect(await claimDownloadSlot(second.id)).toBe(1);
   });
 });
 

@@ -26,8 +26,10 @@ const BUCKET_NAME = env.R2_BUCKET_NAME;
 // multi-GiB upload before the signature expires (1 MB/s on a 10 GiB
 // upload ≈ 2.8 h). PUT URLs are write-only and bound to
 // (key, content-length).
-const UPLOAD_URL_EXPIRY = 4 * 60 * 60;
-const DOWNLOAD_URL_EXPIRY = 15 * 60;
+export const UPLOAD_URL_EXPIRY = 4 * 60 * 60;
+// A streamed download issues ranged GETs against one URL for the whole
+// file, so the URL has to outlive a large download on a slow line.
+const DOWNLOAD_URL_EXPIRY = 4 * 60 * 60;
 
 export interface PresignedDownloadUrl {
   url: string;

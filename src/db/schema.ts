@@ -62,7 +62,13 @@ export const files = pgTable('files', {
   size: bigint('size', { mode: 'number' }).notNull(),
   mimeType: varchar('mime_type', { length: 127 }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
-  isDeleted: boolean('is_deleted').default(false).notNull()
+  isDeleted: boolean('is_deleted').default(false).notNull(),
+  // Open multipart upload at the storage provider. Cleared once the
+  // parts are stitched, so a non-NULL value means "still uploading".
+  uploadId: text('upload_id'),
+  // Times a download URL was handed out for this file. The transfer's
+  // max_downloads caps each file separately.
+  downloadCount: integer('download_count').default(0).notNull(),
 }, (table) => ({
   // Every per-transfer file lookup and the cascade in the cleanup path.
   transferIdIdx: index('files_transfer_id_idx').on(table.transferId),

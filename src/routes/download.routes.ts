@@ -201,7 +201,7 @@ export const downloadRoutes = new Elysia({ prefix: '/api/download' })
     // the cap. A null return collapses "expired / deleted / not
     // completed / cap exhausted" into the same 404 — existence
     // oracle policy.
-    const claimed = await claimDownloadSlot(file.transferId);
+    const claimed = await claimDownloadSlot(file.id);
     if (claimed === null) {
       set.status = 404;
       return { error: 'Transfer has expired' };

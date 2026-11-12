@@ -31,6 +31,7 @@ export function defaultR2Mock() {
     // Multipart stubs (ADR-0009). The mocked uploadId is deterministic
     // so tests can assert against it without snapshotting random values.
     MULTIPART_PART_SIZE,
+    UPLOAD_URL_EXPIRY: 4 * 60 * 60,
     initMultipartUpload: async (key: string, totalBytes: number) => {
       const partCount = Math.max(1, Math.ceil(totalBytes / MULTIPART_PART_SIZE));
       const partUrls = Array.from({ length: partCount }, (_, i) => {

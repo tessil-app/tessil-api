@@ -1,4 +1,4 @@
-import { eq, and, gt, lt, desc, sql } from 'drizzle-orm';
+import { eq, and, gt, lt, desc, sql, notExists } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { db } from '../db';
 import { transfers, files, transferEvents, type NewTransfer, type NewFile, type Transfer, type File } from '../db/schema';
@@ -74,17 +74,30 @@ export async function setOwnedTransferTitle(
 // vault column in the same UPDATE — caller has already validated the
 // blob layout (60 bytes). Anonymous and unvaulted callers leave it NULL.
 // See docs/adr/0004-vault-redesign-password-and-recovery-phrase.md.
+// Returns false when the transfer was already completed or its file
+// set no longer matches `expectedFileCount` (the set the caller verified).
 export async function completeTransfer(
   id: string,
-  vaultWrap?: { wrappedKey: Uint8Array }
-): Promise<void> {
-  await db
+  vaultWrap?: { wrappedKey: Uint8Array },
+  expectedFileCount?: number,
+): Promise<boolean> {
+  const updated = await db
     .update(transfers)
     .set({
       isCompleted: true,
       ...(vaultWrap ? { wrappedKey: vaultWrap.wrappedKey } : {}),
     })
-    .where(eq(transfers.id, id));
+    .where(
+      and(
+        eq(transfers.id, id),
+        eq(transfers.isCompleted, false),
+        expectedFileCount === undefined
+          ? undefined
+          : sql`(select count(*) from ${files} where ${files.transferId} = ${transfers.id} and ${files.isDeleted} = false) = ${expectedFileCount}`,
+      ),
+    )
+    .returning({ id: transfers.id });
+  return updated.length > 0;
 }
 
 export async function verifyTransferPassword(transferId: string, password: string): Promise<boolean> {
@@ -137,34 +150,57 @@ export async function getCompletedValidTransfer(id: string): Promise<Transfer | 
   return transfer;
 }
 
-// Atomic "may I download?" gate. Increments download_count by 1
-// *only* when the transfer is still live, completed, not
-// soft-deleted, and either has no download cap or is strictly
-// below it — all in a single UPDATE so two concurrent calls cannot
-// both pass a stale read of the count and overshoot
-// `max_downloads`.
+// Atomic "may I download this file?" gate. `max_downloads` caps each
+// file separately, so one recipient can fetch every file of a transfer
+// on a single download. The transfer's download_count is the number of
+// complete downloads: the lowest count across its files.
 //
-// Returns the new download_count on success, or null when the transfer is no
-// longer downloadable for any of the reasons above. Callers cannot
-// distinguish *why* the claim failed; that's by design — the
-// (expired / deleted / cap-reached) states collapse into a single 404 at
-// the route layer per doc 20 §4.
-export async function claimDownloadSlot(transferId: string): Promise<number | null> {
-  const updated = await db
-    .update(transfers)
-    .set({ downloadCount: sql`${transfers.downloadCount} + 1` })
-    .where(
-      and(
-        eq(transfers.id, transferId),
-        eq(transfers.isDeleted, false),
-        eq(transfers.isCompleted, true),
-        gt(transfers.expiresAt, new Date()),
-        sql`(${transfers.maxDownloads} IS NULL OR ${transfers.downloadCount} < ${transfers.maxDownloads})`,
-      ),
-    )
-    .returning({ downloadCount: transfers.downloadCount });
+// The transfer row is locked first, so concurrent claims cannot both
+// pass a stale read and overshoot the cap.
+//
+// Returns the transfer's download_count on success, or null when the
+// file is no longer downloadable. Callers cannot distinguish why
+// (expired / deleted / not completed / cap reached); the route layer
+// collapses all of them into a single 404 per doc 20 §4.
+export async function claimDownloadSlot(fileId: string): Promise<number | null> {
+  return db.transaction(async (tx) => {
+    const [row] = await tx
+      .select({ id: transfers.id, maxDownloads: transfers.maxDownloads })
+      .from(files)
+      .innerJoin(transfers, eq(transfers.id, files.transferId))
+      .where(
+        and(
+          eq(files.id, fileId),
+          eq(files.isDeleted, false),
+          eq(transfers.isDeleted, false),
+          eq(transfers.isCompleted, true),
+          gt(transfers.expiresAt, new Date()),
+        ),
+      )
+      .for('update', { of: transfers });
+    if (!row) return null;
 
-  return updated[0]?.downloadCount ?? null;
+    const claimed = await tx
+      .update(files)
+      .set({ downloadCount: sql`${files.downloadCount} + 1` })
+      .where(
+        and(
+          eq(files.id, fileId),
+          row.maxDownloads === null ? undefined : lt(files.downloadCount, row.maxDownloads),
+        ),
+      )
+      .returning({ id: files.id });
+    if (claimed.length === 0) return null;
+
+    const [lowest] = await tx
+      .select({ count: sql<number>`min(${files.downloadCount})` })
+      .from(files)
+      .where(and(eq(files.transferId, row.id), eq(files.isDeleted, false)));
+    const downloadCount = Number(lowest?.count ?? 0);
+
+    await tx.update(transfers).set({ downloadCount }).where(eq(transfers.id, row.id));
+    return downloadCount;
+  });
 }
 
 async function logTransferEvent(
@@ -194,43 +230,50 @@ async function hardDeleteTransfer(id: string): Promise<void> {
   await db.delete(transfers).where(eq(transfers.id, id));
 }
 
-export async function abortTransfer(id: string): Promise<void> {
-  const { deleteFromR2 } = await import('./r2.service');
-  const transfer = await getTransferById(id);
-  const transferFiles = await getFilesForTransfer(id);
-
-  const totalBytes = transferFiles.reduce((sum, f) => sum + f.size, 0);
-
-  for (const file of transferFiles) {
+// Removes the stored bytes behind file rows: the open multipart upload,
+// if any, and the object. Returns false when storage refused, in which
+// case the caller must keep the rows: they are the only record of the
+// keys, and deleting them would orphan the ciphertext for good.
+export async function removeStoredFiles(
+  rows: Pick<File, 'r2Key' | 'uploadId'>[],
+): Promise<boolean> {
+  const { abortMultipartUpload, deleteFromR2 } = await import('./r2.service');
+  let allRemoved = true;
+  for (const row of rows) {
     try {
-      await deleteFromR2(file.r2Key);
-    } catch {
-      // best-effort — DB cleanup proceeds regardless
+      if (row.uploadId) await abortMultipartUpload(row.r2Key, row.uploadId);
+      await deleteFromR2(row.r2Key);
+    } catch (err) {
+      allRemoved = false;
+      console.error(`[storage] Failed to remove ${row.r2Key}:`, err);
     }
   }
-
-  if (transfer) {
-    await logTransferEvent('aborted', transfer, transferFiles.length, totalBytes);
-  }
-
-  await hardDeleteTransfer(id);
+  return allRemoved;
 }
 
-export async function deleteExpiredTransfer(transfer: Transfer): Promise<void> {
-  const { deleteFromR2 } = await import('./r2.service');
+// Storage first, rows second. Returns false, leaving the rows for the
+// next sweep, when storage could not be cleared.
+async function removeTransfer(
+  transfer: Transfer,
+  event: 'expired' | 'aborted',
+): Promise<boolean> {
   const transferFiles = await getFilesForTransfer(transfer.id);
+  if (!(await removeStoredFiles(transferFiles))) return false;
+
   const totalBytes = transferFiles.reduce((sum, f) => sum + f.size, 0);
-
-  for (const file of transferFiles) {
-    try {
-      await deleteFromR2(file.r2Key);
-    } catch (err) {
-      console.error(`[cleanup] Failed to delete R2 object ${file.r2Key}:`, err);
-    }
-  }
-
-  await logTransferEvent('expired', transfer, transferFiles.length, totalBytes);
+  await logTransferEvent(event, transfer, transferFiles.length, totalBytes);
   await hardDeleteTransfer(transfer.id);
+  return true;
+}
+
+export async function abortTransfer(id: string): Promise<boolean> {
+  const transfer = await getTransferById(id);
+  if (!transfer) return true;
+  return removeTransfer(transfer, 'aborted');
+}
+
+export async function deleteExpiredTransfer(transfer: Transfer): Promise<boolean> {
+  return removeTransfer(transfer, 'expired');
 }
 
 export async function logCompletedTransfer(transfer: Transfer): Promise<void> {
@@ -394,21 +437,8 @@ export async function getSoftDeletedTransfers(): Promise<Transfer[]> {
 // Storage cleanup + hard-delete for an owner-soft-deleted transfer. Logged
 // to transfer_events as 'aborted' (user-initiated termination). User-attributed
 // audit is logged separately to auth_events at the DELETE handler. See doc 20 §7.
-export async function purgeOwnerDeletedTransfer(transfer: Transfer): Promise<void> {
-  const { deleteFromR2 } = await import('./r2.service');
-  const transferFiles = await getFilesForTransfer(transfer.id);
-  const totalBytes = transferFiles.reduce((sum, f) => sum + f.size, 0);
-
-  for (const file of transferFiles) {
-    try {
-      await deleteFromR2(file.r2Key);
-    } catch (err) {
-      console.error(`[cleanup] Failed to delete R2 object ${file.r2Key}:`, err);
-    }
-  }
-
-  await logTransferEvent('aborted', transfer, transferFiles.length, totalBytes);
-  await hardDeleteTransfer(transfer.id);
+export async function purgeOwnerDeletedTransfer(transfer: Transfer): Promise<boolean> {
+  return removeTransfer(transfer, 'aborted');
 }
 
 // File operations
@@ -469,6 +499,10 @@ export async function getFileById(id: string): Promise<File | null> {
   return file ?? null;
 }
 
+export async function setFileUploadId(id: string, uploadId: string | null): Promise<void> {
+  await db.update(files).set({ uploadId }).where(eq(files.id, id));
+}
+
 // Hard-delete a single file row by ID. Used by the multipart abort
 // path — the file never completed so there's no risk of dangling
 // transfer state, and the row should be gone (not soft-deleted) so
@@ -497,9 +531,15 @@ export async function getExpiredTransfers(): Promise<Transfer[]> {
     );
 }
 
-// Incomplete transfers older than 30 minutes — upload was abandoned or failed
+// Incomplete transfers nobody is uploading to any more. A transfer is
+// left alone while any of its files could still be receiving parts,
+// which is for as long as that file's upload URLs are valid.
+const ABANDONED_GRACE_MS = 30 * 60 * 1000;
+
 export async function getAbandonedTransfers(): Promise<Transfer[]> {
-  const cutoff = new Date(Date.now() - 30 * 60 * 1000);
+  const { UPLOAD_URL_EXPIRY } = await import('./r2.service');
+  const idleCutoff = new Date(Date.now() - ABANDONED_GRACE_MS);
+  const uploadCutoff = new Date(Date.now() - UPLOAD_URL_EXPIRY * 1000 - ABANDONED_GRACE_MS);
   return db
     .select()
     .from(transfers)
@@ -507,7 +547,13 @@ export async function getAbandonedTransfers(): Promise<Transfer[]> {
       and(
         eq(transfers.isDeleted, false),
         eq(transfers.isCompleted, false),
-        lt(transfers.createdAt, cutoff)
+        lt(transfers.createdAt, idleCutoff),
+        notExists(
+          db
+            .select({ id: files.id })
+            .from(files)
+            .where(and(eq(files.transferId, transfers.id), gt(files.createdAt, uploadCutoff))),
+        ),
       )
     );
 }
