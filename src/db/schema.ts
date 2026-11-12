@@ -115,6 +115,10 @@ export const users = pgTable('users', {
   // side. Set on first checkout; nullable for users who never reach
   // billing.
   polarCustomerId: varchar('polar_customer_id', { length: 64 }),
+  // ECDH P-256 public key, uncompressed point (65 bytes). Others encrypt
+  // to it; the private half lives in vault_items. NULL until the user's
+  // vault has generated a keypair.
+  publicKey: bytea('public_key'),
 }, (table) => ({
   emailUnique: uniqueIndex('users_email_unique').on(table.email),
   polarCustomerIdUnique: uniqueIndex('users_polar_customer_id_unique').on(table.polarCustomerId),
@@ -300,6 +304,23 @@ export const userVaults = pgTable('user_vaults', {
   phraseRegeneratedAt: timestamp('phrase_regenerated_at', { withTimezone: true }),
 });
 
+// Secrets a user keeps in their vault, encrypted in the browser under a
+// key derived from K_vault. The server stores and returns them and can
+// read none of them. One item per kind for now.
+// See docs/adr/0014-portal-keys-and-vault-items.md.
+export const vaultItems = pgTable('vault_items', {
+  id: varchar('id', { length: 21 }).primaryKey(), // nanoid
+  userId: varchar('user_id', { length: 21 })
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  kind: varchar('kind', { length: 32 }).notNull(), // 'user_private_key'
+  ciphertext: bytea('ciphertext').notNull(), // version(1) || iv(12) || AES-GCM output
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  userKindUnique: uniqueIndex('vault_items_user_kind_unique').on(table.userId, table.kind),
+}));
+
+export type VaultItem = typeof vaultItems.$inferSelect;
 export type Authenticator = typeof authenticators.$inferSelect;
 export type NewAuthenticator = typeof authenticators.$inferInsert;
 export type WebauthnChallenge = typeof webauthnChallenges.$inferSelect;

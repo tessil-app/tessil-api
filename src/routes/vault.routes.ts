@@ -7,6 +7,7 @@
 //   POST /api/me/vault/setup          (auth — one-shot first-time setup)
 //   POST /api/me/vault/password       (auth — rewrap K_vault under new password)
 //   POST /api/me/vault/phrase         (auth — rewrap K_vault under new phrase)
+//   POST /api/me/vault/keypair        (auth, one-shot: public key + wrapped private key)
 
 import { Elysia, t } from "elysia";
 import { authPlugin } from "../auth/middleware";
@@ -17,8 +18,14 @@ import {
   CURRENT_KDF_VERSION,
   SALT_BYTES,
   WRAP_BYTES,
+  PUBLIC_KEY_BYTES,
+  WRAPPED_PRIVATE_KEY_MAX_BYTES,
+  WRAPPED_PRIVATE_KEY_MIN_BYTES,
+  createUserKeypair,
   createUserVault,
+  getUserKeypair,
   getUserVault,
+  isValidPublicKey,
   updateVaultPasswordWrap,
   updateVaultPhraseWrap,
 } from "../services/vault.service";
@@ -64,8 +71,11 @@ export const vaultRoutes = new Elysia({ prefix: "/api/me/vault" })
     if (!row) {
       return { isSetup: false as const };
     }
+    const keypair = await getUserKeypair(me.id);
     return {
       isSetup: true as const,
+      publicKey: keypair ? bytesToBase64Url(keypair.publicKey) : null,
+      wrappedPrivateKey: keypair ? bytesToBase64Url(keypair.wrappedPrivateKey) : null,
       kdfVersion: row.kdfVersion,
       saltPassword: bytesToBase64Url(row.saltPassword),
       saltPhrase: bytesToBase64Url(row.saltPhrase),
@@ -140,6 +150,68 @@ export const vaultRoutes = new Elysia({ prefix: "/api/me/vault" })
         saltPhrase: t.String({ maxLength: 64 }),
         wrapPassword: t.String({ maxLength: 128 }),
         wrapPhrase: t.String({ maxLength: 128 }),
+      }),
+    },
+  )
+
+  .post(
+    "/keypair",
+    async ({ body, me, ipContext, originRejected, request, set }) => {
+      if (originRejected) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
+      if (!me) {
+        set.status = 401;
+        return { error: "Not authenticated" };
+      }
+
+      const limit = await checkRateLimit(me.id, rateLimiters.vaultSetup);
+      if (!limit.allowed) {
+        set.status = 429;
+        set.headers["Retry-After"] = String(limit.resetIn);
+        return { error: "Rate limit exceeded. Try again later." };
+      }
+
+      const publicKey = decodeFixedLength(body.publicKey, PUBLIC_KEY_BYTES);
+      const wrappedPrivateKey = decodeBase64Url(body.wrappedPrivateKey);
+      if (
+        !publicKey ||
+        !(await isValidPublicKey(publicKey)) ||
+        !wrappedPrivateKey ||
+        wrappedPrivateKey.length < WRAPPED_PRIVATE_KEY_MIN_BYTES ||
+        wrappedPrivateKey.length > WRAPPED_PRIVATE_KEY_MAX_BYTES
+      ) {
+        set.status = 400;
+        return { error: "Malformed keypair payload." };
+      }
+
+      const result = await createUserKeypair(me.id, { publicKey, wrappedPrivateKey });
+      if (!result.ok) {
+        set.status = 409;
+        return {
+          error:
+            result.reason === "no_vault"
+              ? "Set up the vault first."
+              : "A keypair already exists.",
+        };
+      }
+
+      await logAuthEvent({
+        eventType: "vault_keypair_created",
+        userId: me.id,
+        email: me.email,
+        ipContext,
+        userAgent: request.headers.get("user-agent"),
+      });
+
+      set.status = 201;
+      return { ok: true as const };
+    },
+    {
+      body: t.Object({
+        publicKey: t.String({ maxLength: 128 }),
+        wrappedPrivateKey: t.String({ maxLength: 1024 }),
       }),
     },
   )
