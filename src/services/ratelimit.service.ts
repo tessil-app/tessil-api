@@ -633,3 +633,15 @@ export const rateLimiters = {
   vaultPasswordChange: { prefix: 'vault-password-change', windowSeconds: HOUR_SECONDS, maxRequests: 10 },
   vaultPhraseRegenerate: { prefix: 'vault-phrase-regen', windowSeconds: HOUR_SECONDS, maxRequests: 5 },
 } as const;
+
+// Monthly volume received through an account's portals, all of them
+// together, keyed by the owner's ID. Kept apart from the owner's own
+// sending so an outsider with a link cannot use that up.
+export function portalIntakeVolume(maxBytes: number, increment: number) {
+  return {
+    ...rateLimiters.monthlyUploadVolume,
+    prefix: 'portal-intake-volume',
+    maxBytes,
+    increment,
+  };
+}
