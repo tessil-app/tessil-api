@@ -379,6 +379,9 @@ export const portalMembers = pgTable('portal_members', {
   keyVersion: integer('key_version').default(1).notNull(),
   sealedKeys: bytea('sealed_keys').notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  // When this member last looked at the portal's deliveries. Anything that
+  // arrived later is shown to them as new.
+  lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).defaultNow().notNull(),
 }, (table) => ({
   portalUserUnique: uniqueIndex('portal_members_portal_user_unique').on(table.portalId, table.userId),
   userIdx: index('portal_members_user_id_idx').on(table.userId),

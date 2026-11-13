@@ -243,6 +243,45 @@ describe("what an outsider with the link can use up", () => {
   });
 });
 
+describe("what arrived, and what is new", () => {
+  async function deliver(portalId: string, size: number) {
+    const { body } = await startDeposit(portalId);
+    expect((await addFile(body.transferId, size)).status).toBe(200);
+    const done = await call(null, "POST", "/api/upload/complete", { transferId: body.transferId, sealedKey: SEALED_KEY });
+    expect(done.status).toBe(200);
+  }
+  type Row = { id: string; deliveries: number; unseen: number; storedBytes: number; lastDeliveryAt: string | null };
+  const row = async (cookie: string, portalId: string) =>
+    ((await (await call(cookie, "GET", "/api/portals")).json()) as { portals: Row[] }).portals.find((p) => p.id === portalId)!;
+
+  it("counts deliveries per portal and forgets 'new' once the member has looked", async () => {
+    const { cookie, portalId } = await ownerWithPortal();
+    expect(await row(cookie, portalId)).toMatchObject({ deliveries: 0, unseen: 0, storedBytes: 0, lastDeliveryAt: null });
+
+    await deliver(portalId, 1000);
+    await deliver(portalId, 2500);
+    const before = await row(cookie, portalId);
+    expect(before).toMatchObject({ deliveries: 2, unseen: 2, storedBytes: 3500 });
+    expect(before.lastDeliveryAt).not.toBeNull();
+
+    const list = (await (await call(cookie, "GET", `/api/portals/${portalId}/deposits`)).json()) as { lastSeenAt: string; deposits: { createdAt: string }[] };
+    expect(list.deposits.every((d) => d.createdAt > list.lastSeenAt)).toBe(true);
+
+    expect((await call(cookie, "POST", `/api/portals/${portalId}/seen`)).status).toBe(200);
+    expect(await row(cookie, portalId)).toMatchObject({ deliveries: 2, unseen: 0 });
+
+    await deliver(portalId, 10);
+    expect(await row(cookie, portalId)).toMatchObject({ deliveries: 3, unseen: 1, storedBytes: 3510 });
+  });
+
+  it("refuses 'seen' from someone who is not a member", async () => {
+    const { portalId } = await ownerWithPortal();
+    const stranger = await createAuthedUser();
+    expect((await call(stranger.cookie, "POST", `/api/portals/${portalId}/seen`)).status).toBe(404);
+    expect((await call(null, "POST", `/api/portals/${portalId}/seen`)).status).toBe(401);
+  });
+});
+
 describe("monthly volume across an owner's portals", () => {
   it("is shared by every portal and reported on the usage endpoint", async () => {
     const { cookie, portalId } = await ownerWithPortal();

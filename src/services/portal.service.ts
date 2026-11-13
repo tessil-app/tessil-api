@@ -5,7 +5,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { and, count, eq, sql } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { db } from "../db";
-import { portalInvites, portalMembers, portals, users, type Portal } from "../db/schema";
+import { files, portalInvites, portalMembers, portals, transfers, users, type Portal } from "../db/schema";
 import { softDeleteDepositsOf } from "./file.service";
 
 // nonce(12) + public key(65) + a short title + tag(16) at the least. The
@@ -391,4 +391,79 @@ export async function listInvitesForEmail(
     .innerJoin(portals, eq(portals.id, portalInvites.portalId))
     .innerJoin(users, eq(users.id, portals.ownerId))
     .where(eq(portalInvites.email, email));
+}
+
+// ─── what arrived, and what the member has not seen yet ─────────────────────
+
+export interface PortalStats {
+  deliveries: number;
+  /** Arrived after this member last looked. */
+  unseen: number;
+  storedBytes: number;
+  lastDeliveryAt: Date | null;
+}
+
+/** Live deliveries per portal, for the portals this user is a member of. */
+export async function portalStatsForMember(userId: string): Promise<Map<string, PortalStats>> {
+  const live = and(
+    eq(transfers.isDeleted, false),
+    eq(transfers.isCompleted, true),
+    sql`${transfers.expiresAt} > now()`,
+  );
+  const [counts, sizes] = await Promise.all([
+    db
+      .select({
+        portalId: portalMembers.portalId,
+        deliveries: count(transfers.id),
+        unseen: sql<number>`count(*) filter (where ${transfers.createdAt} > ${portalMembers.lastSeenAt})`,
+        lastDeliveryAt: sql<Date | null>`max(${transfers.createdAt})`,
+      })
+      .from(portalMembers)
+      .innerJoin(transfers, eq(transfers.portalId, portalMembers.portalId))
+      .where(and(eq(portalMembers.userId, userId), live))
+      .groupBy(portalMembers.portalId),
+    db
+      .select({
+        portalId: portalMembers.portalId,
+        storedBytes: sql<string>`coalesce(sum(${files.size}), 0)`,
+      })
+      .from(portalMembers)
+      .innerJoin(transfers, eq(transfers.portalId, portalMembers.portalId))
+      .innerJoin(files, eq(files.transferId, transfers.id))
+      .where(and(eq(portalMembers.userId, userId), live))
+      .groupBy(portalMembers.portalId),
+  ]);
+
+  const bytes = new Map(sizes.map((s) => [s.portalId, Number(s.storedBytes)]));
+  return new Map(
+    counts.map((c) => [
+      c.portalId,
+      {
+        deliveries: Number(c.deliveries),
+        unseen: Number(c.unseen),
+        storedBytes: bytes.get(c.portalId) ?? 0,
+        lastDeliveryAt: c.lastDeliveryAt ? new Date(c.lastDeliveryAt) : null,
+      },
+    ]),
+  );
+}
+
+/** When this member last looked at the portal's deliveries; null if they are not a member. */
+export async function getMemberLastSeen(portalId: string, userId: string): Promise<Date | null> {
+  const [row] = await db
+    .select({ lastSeenAt: portalMembers.lastSeenAt })
+    .from(portalMembers)
+    .where(and(eq(portalMembers.portalId, portalId), eq(portalMembers.userId, userId)))
+    .limit(1);
+  return row?.lastSeenAt ?? null;
+}
+
+/** Records that the member has looked at everything that arrived so far. */
+export async function markPortalSeen(portalId: string, userId: string): Promise<boolean> {
+  const updated = await db
+    .update(portalMembers)
+    .set({ lastSeenAt: new Date() })
+    .where(and(eq(portalMembers.portalId, portalId), eq(portalMembers.userId, userId)))
+    .returning({ portalId: portalMembers.portalId });
+  return updated.length > 0;
 }

@@ -1,0 +1,1 @@
+ALTER TABLE "portal_members" ADD COLUMN "last_seen_at" timestamp with time zone DEFAULT now() NOT NULL;
