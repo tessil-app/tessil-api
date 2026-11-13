@@ -356,6 +356,12 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       return { error: 'At least one part is required.' };
     }
 
+    // A browser that lost the answer to a successful call asks again.
+    // The upload ID is cleared once storage has assembled the object.
+    if (file.uploadId === null && (await headObject(file.r2Key))) {
+      return { fileId: file.id, size: file.size };
+    }
+
     try {
       await completeMultipartUpload(file.r2Key, file.uploadId ?? uploadId, parts);
       await setFileUploadId(file.id, null);
