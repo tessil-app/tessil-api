@@ -13,7 +13,8 @@ import { db } from "../db";
 import { billingEvents, subscriptions, users, type Subscription } from "../db/schema";
 import {
   createPortalSession,
-  createProCheckout,
+  CheckoutUnavailableError,
+  createCheckout,
   parseWebhook,
   WebhookVerificationError,
 } from "../services/polar.service";
@@ -246,10 +247,16 @@ export const billingRoutes = new Elysia({ prefix: "/api/billing" })
         return { error: "Not authenticated" };
       }
       const cycle = body.cycle === "annual" ? "annual" : "monthly";
+      // Pages from before there were two plans send no plan.
+      const plan = body.plan === "max" ? "max" : "pro";
       try {
-        const { url } = await createProCheckout(me, cycle);
+        const { url } = await createCheckout(me, plan, cycle);
         return { url };
       } catch (err) {
+        if (err instanceof CheckoutUnavailableError) {
+          set.status = 503;
+          return { error: "This plan can't be bought yet.", code: "checkout_unavailable" };
+        }
         console.error("[billing] checkout creation failed:", err);
         set.status = 500;
         return { error: "Checkout creation failed. Please try again." };
@@ -258,6 +265,7 @@ export const billingRoutes = new Elysia({ prefix: "/api/billing" })
     {
       body: t.Object({
         cycle: t.Union([t.Literal("monthly"), t.Literal("annual")]),
+        plan: t.Optional(t.Union([t.Literal("pro"), t.Literal("max")])),
       }),
     },
   )

@@ -41,8 +41,13 @@ mock.module("../../src/services/polar.service", () => ({
     return JSON.parse(body);
   },
   WebhookVerificationError,
-  createProCheckout: async () => {
-    throw new Error("createProCheckout not exercised in webhook tests");
+  CheckoutUnavailableError: class CheckoutUnavailableError extends Error {},
+  createCheckout: async (_user: unknown, plan: string, cycle: string) => {
+    if (plan === "max") {
+      const { CheckoutUnavailableError } = await import("../../src/services/polar.service");
+      throw new CheckoutUnavailableError("not configured");
+    }
+    return { url: `https://polar.test/checkout/${plan}/${cycle}`, checkoutId: "co_1" };
   },
   createPortalSession: async () => {
     throw new Error("createPortalSession not exercised in webhook tests");
@@ -636,6 +641,35 @@ describe("POST /api/billing/checkout — auth gate", () => {
       }),
     );
     expect(res.status).toBe(401);
+  });
+});
+
+describe("POST /api/billing/checkout: which plan", () => {
+  const start = async (body: Record<string, unknown>) => {
+    const { cookie } = await createAuthedUser();
+    return app.handle(
+      authedRequest(cookie, `${APP_URL}/api/billing/checkout`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+  };
+
+  it("defaults to the first paid plan, as pages from before two plans expect", async () => {
+    const res = await start({ cycle: "annual" });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { url: string }).url).toEndWith("/pro/annual");
+  });
+
+  it("says so when a plan cannot be bought yet", async () => {
+    const res = await start({ cycle: "monthly", plan: "max" });
+    expect(res.status).toBe(503);
+    expect(((await res.json()) as { code: string }).code).toBe("checkout_unavailable");
+  });
+
+  it("refuses a plan that does not exist", async () => {
+    expect((await start({ cycle: "monthly", plan: "ultra" })).status).toBe(400);
   });
 });
 
