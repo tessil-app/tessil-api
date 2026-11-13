@@ -3,7 +3,6 @@ import {
   GetObjectCommand,
   DeleteObjectCommand,
   HeadObjectCommand,
-  PutObjectCommand,
   CreateMultipartUploadCommand,
   CompleteMultipartUploadCommand,
   AbortMultipartUploadCommand,
@@ -105,23 +104,6 @@ export async function deleteFromR2(key: string): Promise<void> {
 // staying large enough that throughput on a fast network stays bandwidth-bound
 // rather than request-bound.
 export const MULTIPART_PART_SIZE = 10 * 1024 * 1024;
-
-// What a file small enough for one request gets in place of a real
-// multipart upload ID. Never stored; storage has no such upload.
-export const SINGLE_UPLOAD_ID = "single";
-
-/**
- * A link for storing a whole object in one request, for files no larger
- * than one Part. Shaped like a one-Part upload so callers handle it the same.
- */
-export async function presignSingleUpload(key: string, totalBytes: number): Promise<PresignedPartUrl> {
-  const url = await getSignedUrl(
-    r2Client,
-    new PutObjectCommand({ Bucket: BUCKET_NAME, Key: key, ContentLength: totalBytes }),
-    { expiresIn: UPLOAD_URL_EXPIRY, unhoistableHeaders: new Set(["content-length"]) },
-  );
-  return { partNumber: 1, url, contentLength: totalBytes };
-}
 
 export interface PresignedPartUrl {
   partNumber: number;

@@ -4,9 +4,6 @@ import {
   completeMultipartUpload,
   headObject,
   initMultipartUpload,
-  MULTIPART_PART_SIZE,
-  presignSingleUpload,
-  SINGLE_UPLOAD_ID,
 } from '../services/r2.service';
 import {
   checkAuthedOrIpRateLimit,
@@ -176,7 +173,7 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       return { error: 'Rate limit exceeded. Try again later.' };
     }
 
-    const { transferId, contentType, encryptedName, encryptedNameIv, fileIv, size, singleOk } = body;
+    const { transferId, contentType, encryptedName, encryptedNameIv, fileIv, size } = body;
 
     if (!isValidNanoId(transferId)) {
       set.status = 400;
@@ -294,18 +291,6 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
     }
 
     try {
-      // A file that fits in one Part goes up in one request: no upload to
-      // open or assemble, and nothing for the browser to finish. Only for
-      // browsers that say they can, so pages cached before this still work.
-      if (singleOk && size <= MULTIPART_PART_SIZE) {
-        return {
-          fileId: file.id,
-          r2Key: file.r2Key,
-          uploadId: SINGLE_UPLOAD_ID,
-          single: true as const,
-          partUrls: [await presignSingleUpload(file.r2Key, size)],
-        };
-      }
       const { uploadId, partUrls } = await initMultipartUpload(file.r2Key, size);
       await setFileUploadId(file.id, uploadId);
       return {
@@ -332,8 +317,6 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       fileIv: t.String({ minLength: 1, maxLength: 32 }),
       // A negative or fractional size would lower the totals it is added to.
       size: t.Integer({ minimum: 1 }),
-      // The browser can store a small file with one request.
-      singleOk: t.Optional(t.Boolean()),
     }),
   })
 
@@ -439,9 +422,7 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
     // The row is the only record of the storage key. Keep it, and the
     // volume reservation, until storage confirms the bytes are gone;
     // the abandoned sweep retries whatever is left.
-    // The fallback is for rows from before upload IDs were stored.
-    const legacyUploadId = uploadId === SINGLE_UPLOAD_ID ? null : uploadId;
-    const removed = await removeStoredFiles([{ ...file, uploadId: file.uploadId ?? legacyUploadId }]);
+    const removed = await removeStoredFiles([{ ...file, uploadId: file.uploadId ?? uploadId }]);
     if (!removed) {
       set.status = 502;
       return { error: 'Could not remove the upload. It will be cleaned up automatically.' };

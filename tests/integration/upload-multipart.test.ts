@@ -77,36 +77,6 @@ describe("POST /api/upload/init-multipart", () => {
     expect(body.partUrls[0]!.contentLength).toBe(1024);
   });
 
-  it("a small file gets a one-request link when the browser asks for it", async () => {
-    const transfer = await createTransfer(1);
-    const start = (body: Record<string, unknown>) =>
-      app
-        .handle(new Request(`${APP_URL}/api/upload/init-multipart`, jsonBody({ transferId: transfer.id, ...FILE_FIELDS, ...body })))
-        .then((r) => r.json()) as Promise<{ fileId: string; uploadId: string; single?: boolean; partUrls: { url: string; contentLength: number }[] }>;
-
-    const single = await start({ size: 2048, singleOk: true });
-    expect(single.single).toBe(true);
-    expect(single.partUrls).toHaveLength(1);
-    expect(single.partUrls[0]!.url).toContain("?single");
-    expect(single.partUrls[0]!.contentLength).toBe(2048);
-
-    // An older page that does not ask keeps getting a multipart upload.
-    const older = await start({ size: 2048 });
-    expect(older.single).toBeUndefined();
-    expect(older.uploadId).toStartWith("mock-upload-");
-
-    // Too large for one request, whatever the browser says.
-    const large = await start({ size: 11 * 1024 * 1024, singleOk: true });
-    expect(large.single).toBeUndefined();
-    expect(large.partUrls).toHaveLength(2);
-
-    // Aborting a one-request file removes it without asking storage to abort an upload.
-    const abort = await app.handle(
-      new Request(`${APP_URL}/api/upload/abort-multipart`, jsonBody({ transferId: transfer.id, fileId: single.fileId, uploadId: single.uploadId })),
-    );
-    expect(abort.status).toBe(204);
-  });
-
   it("file just over one Part: returns two Parts with correct sizes", async () => {
     const transfer = await createTransfer(1);
     const size = MULTIPART_PART_SIZE + 100; // one full Part plus a remainder
