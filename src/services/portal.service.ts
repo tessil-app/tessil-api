@@ -380,3 +380,15 @@ export async function removeGuest(
     .returning({ userId: portalMembers.userId });
   return deleted.length > 0;
 }
+
+/** Open invites for an address, with who sent each. Used to tell owners their invitee is ready. */
+export async function listInvitesForEmail(
+  email: string,
+): Promise<{ portalId: string; ownerEmail: string }[]> {
+  return db
+    .select({ portalId: portalInvites.portalId, ownerEmail: users.email })
+    .from(portalInvites)
+    .innerJoin(portals, eq(portals.id, portalInvites.portalId))
+    .innerJoin(users, eq(users.id, portals.ownerId))
+    .where(eq(portalInvites.email, email));
+}

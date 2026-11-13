@@ -242,3 +242,24 @@ describe("removing", () => {
     expect(await db.select().from(portalMembers)).toHaveLength(0);
   });
 });
+
+describe("sharing emails", () => {
+  it("name the other person and link to the right page", async () => {
+    const { buildPortalNotice } = await import("../../src/services/email.service");
+    const invited = buildPortalNotice({ kind: "invited", to: "g@example.test", ownerEmail: "o@example.test" });
+    expect(invited.subject).toContain("o@example.test");
+    expect(invited.button.url.endsWith("/dashboard/portals")).toBe(true);
+
+    const ready = buildPortalNotice({
+      kind: "invitee_ready",
+      to: "o@example.test",
+      inviteeEmail: "g@example.test",
+      portalId: "abc123",
+    });
+    expect(ready.subject).toContain("g@example.test");
+    expect(ready.button.url.endsWith("/dashboard/portals/abc123")).toBe(true);
+
+    const given = buildPortalNotice({ kind: "access_given", to: "g@example.test", ownerEmail: "o@example.test" });
+    expect(given.paragraphs.join(" ")).toContain("accept");
+  });
+});

@@ -374,3 +374,109 @@ export async function sendMagicLink(input: SendMagicLinkInput): Promise<void> {
     throw new Error(`Email send failed: ${response.status}`);
   }
 }
+
+// ─── portal sharing ─────────────────────────────────────────────────────────
+// Three short notices. They name the other person's address and nothing
+// about the portal: its title is encrypted and never reaches the server.
+
+export type PortalNotice =
+  /** To the invitee: someone wants to share a portal with them. */
+  | { kind: "invited"; to: string; ownerEmail: string }
+  /** To the owner: the invitee now has a vault, so access can be given. */
+  | { kind: "invitee_ready"; to: string; inviteeEmail: string; portalId: string }
+  /** To the guest: the owner handed over access. */
+  | { kind: "access_given"; to: string; ownerEmail: string };
+
+interface NoticeContent {
+  subject: string;
+  heading: string;
+  paragraphs: string[];
+  button: { label: string; url: string };
+  footnote: string;
+}
+
+export function buildPortalNotice(notice: PortalNotice): NoticeContent {
+  const portals = `${env.APP_URL}/dashboard/portals`;
+  switch (notice.kind) {
+    case "invited":
+      return {
+        subject: `${notice.ownerEmail} wants to share a Tessil portal with you`,
+        heading: "You're invited to a portal",
+        paragraphs: [
+          `${notice.ownerEmail} wants to share a portal with you on Tessil. A portal is a link through which other people send them files, encrypted so only its members can open them.`,
+          "Sign in with this email address and set up a vault. A free account is enough. They can then give you access, and we'll email you when they have.",
+        ],
+        button: { label: "Sign in to Tessil", url: portals },
+        footnote: `If you don't know ${notice.ownerEmail}, ignore this email. Nothing happens unless you sign in.`,
+      };
+    case "invitee_ready":
+      return {
+        subject: `${notice.inviteeEmail} is ready for your portal`,
+        heading: "Your invite is ready",
+        paragraphs: [
+          `${notice.inviteeEmail} has signed in and set up a vault. Open the portal and choose Sharing to give them access.`,
+          "This step happens in your browser, because only you hold the portal's keys.",
+        ],
+        button: { label: "Open the portal", url: `${portals}/${notice.portalId}` },
+        footnote: "You're getting this because you invited them to a portal.",
+      };
+    case "access_given":
+      return {
+        subject: `${notice.ownerEmail} shared a Tessil portal with you`,
+        heading: "A portal was shared with you",
+        paragraphs: [
+          `${notice.ownerEmail} gave you access to a portal. Open your portals and accept it to see the files sent to it.`,
+        ],
+        button: { label: "View your portals", url: portals },
+        footnote: `If you don't know ${notice.ownerEmail}, you can decline it there.`,
+      };
+  }
+}
+
+function noticeText(c: NoticeContent): string {
+  return [c.heading, "", ...c.paragraphs.flatMap((p) => [p, ""]), c.button.url, "", c.footnote, "", "Tessil"].join("\n");
+}
+
+function noticeHtml(c: NoticeContent): string {
+  return [
+    "<!doctype html>",
+    `<html lang="en"><head><meta charset="utf-8"><title>${escapeHtml(c.heading)}</title></head>`,
+    '<body style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;line-height:1.5;color:#111;max-width:560px;margin:24px auto;padding:0 16px;">',
+    `  <h1 style="font-size:20px;margin:0 0 16px;">${escapeHtml(c.heading)}</h1>`,
+    ...c.paragraphs.map((p) => `  <p>${escapeHtml(p)}</p>`),
+    `  <p style="margin:24px 0;"><a href="${escapeHtml(c.button.url)}" style="display:inline-block;padding:12px 20px;background:#111;color:#fff;text-decoration:none;border-radius:8px;">${escapeHtml(c.button.label)}</a></p>`,
+    `  <p style="font-size:12px;color:#666;">${escapeHtml(c.footnote)}</p>`,
+    "</body></html>",
+  ].join("\n");
+}
+
+/** Never throws: a failed notice must not fail the action that caused it. */
+export async function sendPortalNotice(notice: PortalNotice): Promise<void> {
+  const content = buildPortalNotice(notice);
+  if (!isConfigured()) {
+    console.log(`[email] SCW_TEM not configured, logging portal notice instead.\n  to: ${notice.to}\n  subject: ${content.subject}`);
+    return;
+  }
+  try {
+    const response = await fetch(SCW_TEM_ENDPOINT(env.SCW_TEM_REGION), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Auth-Token": env.SCW_TEM_SECRET_KEY },
+      body: JSON.stringify({
+        from: { email: env.EMAIL_FROM, name: env.EMAIL_FROM_NAME },
+        to: [{ email: notice.to }],
+        project_id: env.SCW_TEM_PROJECT_ID,
+        subject: content.subject,
+        text: noticeText(content),
+        html: noticeHtml(content),
+        ...(env.EMAIL_REPLY_TO
+          ? { additional_headers: [{ key: "Reply-To", value: env.EMAIL_REPLY_TO }] }
+          : {}),
+      }),
+    });
+    if (!response.ok) {
+      console.error(`[email] portal notice (${notice.kind}) failed with ${response.status}`);
+    }
+  } catch (err) {
+    console.error(`[email] portal notice (${notice.kind}) failed:`, err);
+  }
+}

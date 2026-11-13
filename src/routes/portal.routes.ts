@@ -27,6 +27,7 @@ import { authPlugin } from "../auth/middleware";
 import { ipContextPlugin } from "../auth/ipContextPlugin";
 import { logAuthEvent } from "../auth/events";
 import { findUserById } from "../auth/users";
+import { sendPortalNotice } from "../services/email.service";
 import {
   createDeposit,
   getDepositFile,
@@ -565,6 +566,7 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
         } as const;
         return { error: messages[result.reason], code: `invite_${result.reason}` };
       }
+      void sendPortalNotice({ kind: "invited", to: email, ownerEmail: me.email });
       set.status = 201;
       return { id: result.inviteId };
     },
@@ -651,6 +653,8 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
         ipContext,
         userAgent: request.headers.get("user-agent"),
       });
+      const guest = await findUserById(result.userId);
+      if (guest) void sendPortalNotice({ kind: "access_given", to: guest.email, ownerEmail: me.email });
       set.status = 201;
       return { userId: result.userId };
     },
