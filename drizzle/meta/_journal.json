@@ -148,6 +148,13 @@
       "when": 1794506283872,
       "tag": "0020_portal_invites",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1794602042941,
+      "tag": "0021_portal_member_last_seen",
+      "breakpoints": true
     }
   ]
 }

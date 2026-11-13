@@ -10,6 +10,7 @@
 //   GET    /api/portals/:id/deposits (auth, member) list deposits
 //   GET    /api/portals/:id/deposits/files/:fileId/url   (auth, member)
 //   DELETE /api/portals/:id/deposits/:transferId         (auth, member)
+//   POST   /api/portals/:id/seen     (auth, member) everything so far has been looked at
 //
 // Sharing a portal with one other account:
 //   GET    /api/portals/:id/sharing            (auth, owner) guests and invites
@@ -60,7 +61,10 @@ import {
   replaceOwnMemberKeys,
   getMemberRole,
   getPortal,
+  getMemberLastSeen,
   listPortalsForMember,
+  markPortalSeen,
+  portalStatsForMember,
   updateOwnedPortal,
 } from "../services/portal.service";
 
@@ -167,7 +171,7 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
       set.status = 401;
       return { error: "Not authenticated" };
     }
-    const rows = await listPortalsForMember(me.id);
+    const [rows, stats] = await Promise.all([listPortalsForMember(me.id), portalStatsForMember(me.id)]);
     return {
       maxPortals: resolveCaps(me).maxPortals,
       portals: rows.map((row) => ({
@@ -184,6 +188,11 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
         keyVersion: row.keyVersion,
         isDisabled: row.isDisabled,
         createdAt: row.createdAt.toISOString(),
+        // Live deliveries. `unseen` arrived after this member last looked.
+        deliveries: stats.get(row.id)?.deliveries ?? 0,
+        unseen: stats.get(row.id)?.unseen ?? 0,
+        storedBytes: stats.get(row.id)?.storedBytes ?? 0,
+        lastDeliveryAt: stats.get(row.id)?.lastDeliveryAt?.toISOString() ?? null,
       })),
     };
   })
@@ -409,8 +418,14 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
         set.status = 400;
         return { error: "Invalid cursor." };
       }
-      const deposits = await listDeposits(params.id, cursor, DEPOSIT_PAGE_SIZE);
+      const [deposits, lastSeenAt] = await Promise.all([
+        listDeposits(params.id, cursor, DEPOSIT_PAGE_SIZE),
+        getMemberLastSeen(params.id, me.id),
+      ]);
       return {
+        // Deliveries newer than this are new to the member. The page
+        // reports back with POST /:id/seen once it has shown them.
+        lastSeenAt: lastSeenAt?.toISOString() ?? null,
         deposits: deposits.map((d) => ({
           id: d.id,
           createdAt: d.createdAt.toISOString(),
@@ -493,6 +508,26 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
       return null;
     },
     { params: t.Object({ id: t.String(), transferId: t.String() }) },
+  )
+
+  .post(
+    "/:id/seen",
+    async ({ params, me, originRejected, set }) => {
+      if (originRejected) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
+      if (!me) {
+        set.status = 401;
+        return { error: "Not authenticated" };
+      }
+      if (!NANOID_PATTERN.test(params.id) || !(await markPortalSeen(params.id, me.id))) {
+        set.status = 404;
+        return NOT_FOUND;
+      }
+      return { ok: true as const };
+    },
+    { params: t.Object({ id: t.String() }) },
   )
 
   // ─── sharing ──────────────────────────────────────────────────────────────
