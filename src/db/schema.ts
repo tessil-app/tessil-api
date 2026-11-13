@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { pgTable, varchar, bigint, timestamp, integer, boolean, serial, uniqueIndex, index, text, jsonb, customType } from 'drizzle-orm/pg-core';
+import { check, pgTable, varchar, bigint, timestamp, integer, boolean, serial, uniqueIndex, index, text, jsonb, customType } from 'drizzle-orm/pg-core';
 
 // Drizzle ORM ships a `bytea` type only via the experimental column builder
 // in some versions. customType is portable and lets us round-trip Uint8Array.
@@ -307,15 +307,22 @@ export const userVaults = pgTable('user_vaults', {
   userId: varchar('user_id', { length: 21 })
     .primaryKey()
     .references(() => users.id, { onDelete: 'cascade' }),
-  saltPassword: bytea('salt_password').notNull(),
+  // The password pair is NULL for a vault opened by passkey and recovery
+  // phrase only. Both are set or both are NULL.
+  saltPassword: bytea('salt_password'),
   saltPhrase: bytea('salt_phrase').notNull(),
-  wrapPassword: bytea('wrap_password').notNull(),
+  wrapPassword: bytea('wrap_password'),
   wrapPhrase: bytea('wrap_phrase').notNull(),
   kdfVersion: integer('kdf_version').default(1).notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   passwordChangedAt: timestamp('password_changed_at', { withTimezone: true }),
   phraseRegeneratedAt: timestamp('phrase_regenerated_at', { withTimezone: true }),
-});
+}, (table) => ({
+  passwordPairTogether: check(
+    'user_vaults_password_pair_together',
+    sql`(${table.saltPassword} IS NULL) = (${table.wrapPassword} IS NULL)`,
+  ),
+}));
 
 // Secrets a user keeps in their vault, encrypted in the browser under a
 // key derived from K_vault. The server stores and returns them and can
@@ -375,6 +382,26 @@ export const portalMembers = pgTable('portal_members', {
 }, (table) => ({
   portalUserUnique: uniqueIndex('portal_members_portal_user_unique').on(table.portalId, table.userId),
   userIdx: index('portal_members_user_id_idx').on(table.userId),
+}));
+
+// A passkey that can unlock the vault. The passkey's PRF output (which
+// only the authenticator can produce) derives a key that wraps the same
+// K_vault the password and phrase wrap. One row per enrolled passkey;
+// deleting the passkey removes it.
+// See docs/adr/0014-portal-keys-and-vault-items.md, point 10.
+export const vaultPasskeyWraps = pgTable('vault_passkey_wraps', {
+  authenticatorId: varchar('authenticator_id', { length: 21 })
+    .primaryKey()
+    .references(() => authenticators.id, { onDelete: 'cascade' }),
+  userId: varchar('user_id', { length: 21 })
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  // Input to the PRF, random per wrap. Public.
+  prfSalt: bytea('prf_salt').notNull(),
+  wrap: bytea('wrap').notNull(), // iv(12) || ciphertext(32) || tag(16)
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  userIdx: index('vault_passkey_wraps_user_id_idx').on(table.userId),
 }));
 
 export type Portal = typeof portals.$inferSelect;

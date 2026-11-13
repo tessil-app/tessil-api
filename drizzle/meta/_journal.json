@@ -127,6 +127,20 @@
       "when": 1794495978432,
       "tag": "0017_portal_deposits",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1794503501980,
+      "tag": "0018_vault_passkey_wraps",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1794505485250,
+      "tag": "0019_vault_password_optional",
+      "breakpoints": true
     }
   ]
 }
