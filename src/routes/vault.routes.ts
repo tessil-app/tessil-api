@@ -11,6 +11,8 @@
 //   PUT    /api/me/vault/passkeys/:authenticatorId  (auth, let a passkey unlock the vault)
 //   DELETE /api/me/vault/passkeys/:authenticatorId  (auth, stop that)
 
+import { sendPortalNotice } from "../services/email.service";
+import { listInvitesForEmail } from "../services/portal.service";
 import { Elysia, t } from "elysia";
 import { authPlugin } from "../auth/middleware";
 import { ipContextPlugin } from "../auth/ipContextPlugin";
@@ -261,6 +263,22 @@ export const vaultRoutes = new Elysia({ prefix: "/api/me/vault" })
         ipContext,
         userAgent: request.headers.get("user-agent"),
       });
+
+      // Anyone who invited this address to a portal can now give access.
+      void listInvitesForEmail(me.email)
+        .then((invites) =>
+          Promise.all(
+            invites.map((i) =>
+              sendPortalNotice({
+                kind: "invitee_ready",
+                to: i.ownerEmail,
+                inviteeEmail: me.email,
+                portalId: i.portalId,
+              }),
+            ),
+          ),
+        )
+        .catch((err) => console.error("[vault] could not notify portal owners:", err));
 
       set.status = 201;
       return { ok: true as const };
