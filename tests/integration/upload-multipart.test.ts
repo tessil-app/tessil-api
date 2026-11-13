@@ -192,6 +192,33 @@ describe("POST /api/upload/complete-multipart", () => {
     expect(body.size).toBe(1024);
   });
 
+  it("answers a repeated call for a finished file without asking storage again", async () => {
+    const transfer = await createTransfer(1);
+    const init = (await app
+      .handle(
+        new Request(`${APP_URL}/api/upload/init-multipart`, jsonBody({
+          transferId: transfer.id,
+          size: 1024,
+          ...FILE_FIELDS,
+        })),
+      )
+      .then((r) => r.json())) as { fileId: string; uploadId: string };
+    const finish = () =>
+      app.handle(
+        new Request(`${APP_URL}/api/upload/complete-multipart`, jsonBody({
+          transferId: transfer.id,
+          fileId: init.fileId,
+          uploadId: init.uploadId,
+          parts: [{ partNumber: 1, etag: '"abc"' }],
+        })),
+      );
+
+    expect((await finish()).status).toBe(200);
+    const again = await finish();
+    expect(again.status).toBe(200);
+    expect(((await again.json()) as { fileId: string }).fileId).toBe(init.fileId);
+  });
+
   it("non-owner gets 404 on an owned transfer", async () => {
     const { user: owner } = await createAuthedUser();
     const { cookie: stranger } = await createAuthedUser();
