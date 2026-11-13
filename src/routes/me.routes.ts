@@ -15,6 +15,7 @@ import {
   checkRateLimit,
   peekRateLimit,
   peekVolumeLimit,
+  portalIntakeVolume,
   rateLimiters,
 } from "../services/ratelimit.service";
 import { resolveCaps } from "../config/tiers";
@@ -52,9 +53,10 @@ export const meRoutes = new Elysia({ prefix: "/api/me" })
       increment: 0,
     };
 
-    const [daily, monthly, storedBytes] = await Promise.all([
+    const [daily, monthly, intake, storedBytes] = await Promise.all([
       peekRateLimit(me.id, dailyConfig),
       peekVolumeLimit(me.id, monthlyConfig),
+      caps.maxPortals > 0 ? peekVolumeLimit(me.id, portalIntakeVolume(caps.monthlyVolumeBytes, 0)) : null,
       caps.storageBytes === null ? null : getStoredBytes(me.id),
     ]);
 
@@ -66,6 +68,15 @@ export const meRoutes = new Elysia({ prefix: "/api/me" })
         caps.storageBytes === null || storedBytes === null
           ? null
           : { usedBytes: storedBytes, quotaBytes: caps.storageBytes },
+      // NULL on plans without portals.
+      portalVolume:
+        intake === null
+          ? null
+          : {
+              usedBytes: intake.usedBytes,
+              capBytes: caps.monthlyVolumeBytes,
+              resetAt: new Date(now + intake.resetIn * 1000).toISOString(),
+            },
       monthlyVolume: {
         usedBytes: monthly.usedBytes,
         capBytes: caps.monthlyVolumeBytes,

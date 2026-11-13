@@ -202,10 +202,10 @@ describe("what an outsider with the link can use up", () => {
     expect((await addFile(third.body.transferId, 5 * GB)).status).toBe(200);
   });
 
-  it("counts uploads against a monthly volume per portal, and gives it back on abort", async () => {
+  it("counts uploads against one monthly volume per owner, and gives it back on abort", async () => {
     const { user, portalId } = await ownerWithPortal();
-    const config = { ...rateLimiters.monthlyUploadVolume, prefix: "portal-deposit-volume", maxBytes: 0, increment: 0 };
-    const used = async () => (await peekVolumeLimit(portalId, config)).usedBytes;
+    const config = { ...rateLimiters.monthlyUploadVolume, prefix: "portal-intake-volume", maxBytes: 0, increment: 0 };
+    const used = async () => (await peekVolumeLimit(user.id, config)).usedBytes;
 
     const { body } = await startDeposit(portalId);
     const init = await addFile(body.transferId, 3 * GB);
@@ -240,6 +240,33 @@ describe("what an outsider with the link can use up", () => {
 
     // The owner's own monthly volume was never touched.
     expect((await peekVolumeLimit(user.id, { ...rateLimiters.monthlyUploadVolume, maxBytes: 0, increment: 0 })).usedBytes).toBe(0);
+  });
+});
+
+describe("monthly volume across an owner's portals", () => {
+  it("is shared by every portal and reported on the usage endpoint", async () => {
+    const { cookie, portalId } = await ownerWithPortal();
+    const secondId = nanoid();
+    const made = await call(cookie, "POST", "/api/portals", {
+      id: secondId,
+      publicBundle: b64(new Uint8Array(140).fill(3)),
+      sealedKeys: b64(new Uint8Array(200).fill(4)),
+      depositToken: TOKEN,
+    });
+    expect(made.status).toBe(201);
+
+    const a = await startDeposit(portalId);
+    const b = await startDeposit(secondId);
+    expect((await addFile(a.body.transferId, 2 * GB)).status).toBe(200);
+    expect((await addFile(b.body.transferId, 3 * GB)).status).toBe(200);
+
+    const usage = (await (await call(cookie, "GET", "/api/me/usage")).json()) as {
+      portalVolume: { usedBytes: number; capBytes: number } | null;
+      monthlyVolume: { usedBytes: number };
+    };
+    expect(usage.portalVolume?.usedBytes).toBe(5 * GB);
+    expect(usage.portalVolume?.capBytes).toBe(100 * GB);
+    expect(usage.monthlyVolume.usedBytes).toBe(0);
   });
 });
 
