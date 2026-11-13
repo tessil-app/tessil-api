@@ -141,6 +141,22 @@ describe("creating a portal", () => {
     expect(malformed.status).toBe(400);
   });
 
+  it("accepts a bundle large enough for a list of requested items, and no larger", async () => {
+    const { cookie } = await account("pro");
+    const roomy = await call(cookie, "POST", "", {
+      id: newId(),
+      publicBundle: b64(new Uint8Array(8000).fill(3)),
+      sealedKeys: SEALED,
+      depositToken: TOKEN,
+    });
+    expect(roomy.status).toBe(201);
+    const id = await createOne(cookie);
+    const grown = await call(cookie, "PATCH", `/${id}`, { publicBundle: b64(new Uint8Array(8000).fill(5)) });
+    expect(grown.status).toBe(200);
+    const tooBig = await call(cookie, "PATCH", `/${id}`, { publicBundle: b64(new Uint8Array(8300).fill(5)) });
+    expect(tooBig.status).toBe(400);
+  });
+
   it("requires a session", async () => {
     const res = await call(null, "POST", "", { id: newId(), publicBundle: BUNDLE, sealedKeys: SEALED, depositToken: TOKEN });
     expect(res.status).toBe(401);

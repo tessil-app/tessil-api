@@ -7,9 +7,11 @@ import { db } from "../db";
 import { portalMembers, portals, type Portal } from "../db/schema";
 import { softDeleteDepositsOf } from "./file.service";
 
-// nonce(12) + public key(65) + a short title + tag(16), with headroom.
+// nonce(12) + public key(65) + a short title + tag(16) at the least. The
+// bundle also carries what the owner asks visitors for (a list of up to
+// twenty labelled items), so the ceiling leaves room for that.
 export const PUBLIC_BUNDLE_MIN_BYTES = 12 + 65 + 16;
-export const PUBLIC_BUNDLE_MAX_BYTES = 2048;
+export const PUBLIC_BUNDLE_MAX_BYTES = 8192;
 // version(1) + encapsulated key(65) + link key(32) + PKCS#8 key + tag(16).
 export const SEALED_KEYS_MIN_BYTES = 1 + 65 + 32 + 16;
 export const SEALED_KEYS_MAX_BYTES = 1024;
