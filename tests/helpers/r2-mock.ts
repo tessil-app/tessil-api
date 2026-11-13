@@ -47,6 +47,12 @@ export function defaultR2Mock() {
       });
       return { uploadId: `mock-upload-${key}`, key, partUrls };
     },
+    SINGLE_UPLOAD_ID: "single",
+    presignSingleUpload: async (key: string, totalBytes: number) => ({
+      partNumber: 1,
+      url: `https://r2.test.invalid/${key}?single`,
+      contentLength: totalBytes,
+    }),
     completeMultipartUpload: async () => undefined,
     abortMultipartUpload: async () => undefined,
   };
