@@ -1,6 +1,6 @@
 {
   "version": "7",
-  "dialect": "postgresql",
+  "dialect": "postgr0020_portal_invites",
   "entries": [
     {
       "idx": 0,
@@ -140,6 +140,13 @@
       "version": "7",
       "when": 1794505485250,
       "tag": "0019_vault_password_optional",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1794506283872,
+      "tag": "0020_portal_invites",
       "breakpoints": true
     }
   ]

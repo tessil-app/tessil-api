@@ -22,6 +22,9 @@ export interface TierCaps {
   maxPortals: number;
 }
 
+/** Accounts a portal can be shared with, besides its owner. One, for now. */
+export const MAX_PORTAL_GUESTS = 1;
+
 const ANONYMOUS_CAPS: TierCaps = {
   maxFileSize: 500 * MB,
   maxTransferSize: 500 * MB,

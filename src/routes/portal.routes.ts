@@ -11,6 +11,14 @@
 //   GET    /api/portals/:id/deposits/files/:fileId/url   (auth, member)
 //   DELETE /api/portals/:id/deposits/:transferId         (auth, member)
 //
+// Sharing a portal with one other account:
+//   GET    /api/portals/:id/sharing            (auth, owner) guests and invites
+//   POST   /api/portals/:id/invites            (auth, owner) invite an email
+//   DELETE /api/portals/:id/invites/:inviteId  (auth, owner)
+//   POST   /api/portals/:id/members            (auth, owner) hand the keys to an invitee
+//   PUT    /api/portals/:id/members/me         (auth, member) replace own copy of the keys
+//   DELETE /api/portals/:id/members/:userId    (auth, owner or that member)
+//
 // Every blob here is encrypted in the browser. The server checks sizes
 // and ownership and nothing else.
 
@@ -31,7 +39,8 @@ import {
   ENCRYPTED_TITLE_MAX_LENGTH,
   validateEncryptedTitle,
 } from "../utils/encryptedTitle";
-import { resolveCaps } from "../config/tiers";
+import { isLikelyEmail, normaliseEmail } from "../auth/tokens";
+import { MAX_PORTAL_GUESTS, resolveCaps } from "../config/tiers";
 import { checkIpRateLimit, checkRateLimit, rateLimiters } from "../services/ratelimit.service";
 import {
   DEPOSIT_TOKEN_BYTES,
@@ -40,8 +49,14 @@ import {
   SEALED_KEYS_MAX_BYTES,
   SEALED_KEYS_MIN_BYTES,
   createPortal,
+  admitInvitee,
+  createPortalInvite,
   deleteOwnedPortal,
+  deletePortalInvite,
   depositTokenMatches,
+  getPortalSharing,
+  removeGuest,
+  replaceOwnMemberKeys,
   getMemberRole,
   getPortal,
   listPortalsForMember,
@@ -157,6 +172,12 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
       portals: rows.map((row) => ({
         id: row.id,
         role: row.role,
+        // For a guest: who handed them the keys, to check the handover against.
+        owner: {
+          userId: row.owner.userId,
+          email: row.owner.email,
+          publicKey: row.owner.publicKey ? b64(row.owner.publicKey) : null,
+        },
         publicBundle: b64(row.publicBundle),
         sealedKeys: b64(row.sealedKeys),
         keyVersion: row.keyVersion,
@@ -471,4 +492,235 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
       return null;
     },
     { params: t.Object({ id: t.String(), transferId: t.String() }) },
+  )
+
+  // ─── sharing ──────────────────────────────────────────────────────────────
+
+  .get(
+    "/:id/sharing",
+    async ({ params, me, set }) => {
+      if (!me) {
+        set.status = 401;
+        return { error: "Not authenticated" };
+      }
+      if (!NANOID_PATTERN.test(params.id) || (await getMemberRole(params.id, me.id)) !== "owner") {
+        set.status = 404;
+        return NOT_FOUND;
+      }
+      const sharing = await getPortalSharing(params.id);
+      return {
+        maxGuests: MAX_PORTAL_GUESTS,
+        guests: sharing.guests.map((g) => ({
+          userId: g.userId,
+          email: g.email,
+          publicKey: g.publicKey ? b64(g.publicKey) : null,
+        })),
+        invites: sharing.invites.map((i) => ({
+          id: i.id,
+          email: i.email,
+          createdAt: i.createdAt.toISOString(),
+          // Null until the invitee has an account with a keypair.
+          ready: i.ready ? { userId: i.ready.userId, publicKey: b64(i.ready.publicKey) } : null,
+        })),
+      };
+    },
+    { params: t.Object({ id: t.String() }) },
+  )
+
+  .post(
+    "/:id/invites",
+    async ({ params, body, me, originRejected, set }) => {
+      if (originRejected) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
+      if (!me) {
+        set.status = 401;
+        return { error: "Not authenticated" };
+      }
+      const limit = await checkRateLimit(me.id, rateLimiters.portalInvite);
+      if (!limit.allowed) {
+        set.status = 429;
+        set.headers["Retry-After"] = String(limit.resetIn);
+        return { error: "Rate limit exceeded. Try again later." };
+      }
+      const email = normaliseEmail(body.email);
+      if (!NANOID_PATTERN.test(params.id) || !isLikelyEmail(email)) {
+        set.status = 400;
+        return { error: "Enter a valid email address." };
+      }
+
+      const result = await createPortalInvite(me.id, me.email, params.id, email, MAX_PORTAL_GUESTS);
+      if (!result.ok) {
+        if (result.reason === "not_owner") {
+          set.status = 404;
+          return NOT_FOUND;
+        }
+        set.status = 409;
+        const messages = {
+          own_email: "That's your own address.",
+          full: "This portal is already shared with someone. Remove them first.",
+          already_invited: "You've already invited that address.",
+          already_member: "That person already has access.",
+        } as const;
+        return { error: messages[result.reason], code: `invite_${result.reason}` };
+      }
+      set.status = 201;
+      return { id: result.inviteId };
+    },
+    {
+      params: t.Object({ id: t.String() }),
+      body: t.Object({ email: t.String({ maxLength: 320 }) }),
+    },
+  )
+
+  .delete(
+    "/:id/invites/:inviteId",
+    async ({ params, me, originRejected, set }) => {
+      if (originRejected) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
+      if (!me) {
+        set.status = 401;
+        return { error: "Not authenticated" };
+      }
+      if (
+        !NANOID_PATTERN.test(params.id) ||
+        !NANOID_PATTERN.test(params.inviteId) ||
+        !(await deletePortalInvite(me.id, params.id, params.inviteId))
+      ) {
+        set.status = 404;
+        return NOT_FOUND;
+      }
+      set.status = 204;
+      return null;
+    },
+    { params: t.Object({ id: t.String(), inviteId: t.String() }) },
+  )
+
+  .post(
+    "/:id/members",
+    async ({ params, body, me, ipContext, originRejected, request, set }) => {
+      if (originRejected) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
+      if (!me) {
+        set.status = 401;
+        return { error: "Not authenticated" };
+      }
+      const limit = await checkRateLimit(me.id, rateLimiters.portalWrite);
+      if (!limit.allowed) {
+        set.status = 429;
+        set.headers["Retry-After"] = String(limit.resetIn);
+        return { error: "Rate limit exceeded. Try again later." };
+      }
+      const sealedKeys = decodeBounded(body.sealedKeys, SEALED_KEYS_MIN_BYTES, SEALED_KEYS_MAX_BYTES);
+      const sealedTo = decodeBounded(body.sealedTo, 65, 65);
+      if (
+        !NANOID_PATTERN.test(params.id) ||
+        !NANOID_PATTERN.test(body.inviteId) ||
+        !sealedKeys ||
+        !sealedTo
+      ) {
+        set.status = 400;
+        return { error: "Malformed request." };
+      }
+
+      const result = await admitInvitee(me.id, params.id, body.inviteId, sealedKeys, sealedTo);
+      if (!result.ok) {
+        if (result.reason === "not_owner" || result.reason === "no_invite") {
+          set.status = 404;
+          return NOT_FOUND;
+        }
+        set.status = 409;
+        return {
+          error:
+            result.reason === "not_ready"
+              ? "They haven't set up their account yet."
+              : "Their key changed. Try again.",
+          code: `admit_${result.reason}`,
+        };
+      }
+
+      await logAuthEvent({
+        eventType: "portal_shared",
+        userId: me.id,
+        email: me.email,
+        ipContext,
+        userAgent: request.headers.get("user-agent"),
+      });
+      set.status = 201;
+      return { userId: result.userId };
+    },
+    {
+      params: t.Object({ id: t.String() }),
+      body: t.Object({
+        inviteId: t.String({ maxLength: 21 }),
+        sealedKeys: t.String({ maxLength: 2048 }),
+        // The invitee's public key the keys were sealed to.
+        sealedTo: t.String({ maxLength: 128 }),
+      }),
+    },
+  )
+
+  .put(
+    "/:id/members/me",
+    async ({ params, body, me, originRejected, set }) => {
+      if (originRejected) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
+      if (!me) {
+        set.status = 401;
+        return { error: "Not authenticated" };
+      }
+      const sealedKeys = decodeBounded(body.sealedKeys, SEALED_KEYS_MIN_BYTES, SEALED_KEYS_MAX_BYTES);
+      if (!NANOID_PATTERN.test(params.id) || !sealedKeys) {
+        set.status = 400;
+        return { error: "Malformed request." };
+      }
+      if (!(await replaceOwnMemberKeys(params.id, me.id, sealedKeys))) {
+        set.status = 404;
+        return NOT_FOUND;
+      }
+      return { ok: true as const };
+    },
+    {
+      params: t.Object({ id: t.String() }),
+      body: t.Object({ sealedKeys: t.String({ maxLength: 2048 }) }),
+    },
+  )
+
+  .delete(
+    "/:id/members/:userId",
+    async ({ params, me, ipContext, originRejected, request, set }) => {
+      if (originRejected) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
+      if (!me) {
+        set.status = 401;
+        return { error: "Not authenticated" };
+      }
+      if (
+        !NANOID_PATTERN.test(params.id) ||
+        !NANOID_PATTERN.test(params.userId) ||
+        !(await removeGuest(me.id, params.id, params.userId))
+      ) {
+        set.status = 404;
+        return NOT_FOUND;
+      }
+      await logAuthEvent({
+        eventType: "portal_unshared",
+        userId: me.id,
+        email: me.email,
+        ipContext,
+        userAgent: request.headers.get("user-agent"),
+      });
+      set.status = 204;
+      return null;
+    },
+    { params: t.Object({ id: t.String(), userId: t.String() }) },
   );

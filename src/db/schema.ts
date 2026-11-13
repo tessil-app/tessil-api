@@ -404,6 +404,22 @@ export const vaultPasskeyWraps = pgTable('vault_passkey_wraps', {
   userIdx: index('vault_passkey_wraps_user_id_idx').on(table.userId),
 }));
 
+// Someone a portal's owner wants to share it with. An invite is only an
+// intention: the invitee becomes a member when the owner's browser hands
+// them the portal's keys, which needs the invitee to have an account with
+// a keypair. Until then the invite waits, keyed by email.
+export const portalInvites = pgTable('portal_invites', {
+  id: varchar('id', { length: 21 }).primaryKey(), // nanoid
+  portalId: varchar('portal_id', { length: 21 })
+    .notNull()
+    .references(() => portals.id, { onDelete: 'cascade' }),
+  email: varchar('email', { length: 320 }).notNull(), // normalised
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  portalEmailUnique: uniqueIndex('portal_invites_portal_email_unique').on(table.portalId, table.email),
+  emailIdx: index('portal_invites_email_idx').on(table.email),
+}));
+
 export type Portal = typeof portals.$inferSelect;
 export type PortalMember = typeof portalMembers.$inferSelect;
 export type VaultItem = typeof vaultItems.$inferSelect;
