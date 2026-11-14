@@ -581,3 +581,89 @@ describe("an email when files arrive", () => {
     expect(row.lastNotifiedAt).not.toBeNull();
   });
 });
+
+describe("a portal with a password", () => {
+  const ACCESS = b64(new Uint8Array(32).fill(9));
+  const WRONG = b64(new Uint8Array(32).fill(8));
+
+  async function locked() {
+    const made = await ownerWithPortal();
+    const res = await call(made.cookie, "PATCH", `/api/portals/${made.portalId}`, { accessToken: ACCESS });
+    expect(res.status).toBe(200);
+    return made;
+  }
+
+  it("hands out nothing on the public read, and the bundle to someone with the token", async () => {
+    const { cookie, portalId } = await locked();
+    const plain = await (await call(null, "GET", `/api/portals/${portalId}/public`)).json();
+    expect(plain).toEqual({ id: portalId, locked: true });
+
+    const wrong = await call(null, "POST", `/api/portals/${portalId}/unlock`, { accessToken: WRONG });
+    expect(wrong.status).toBe(403);
+    expect(((await wrong.json()) as { code: string }).code).toBe("password_wrong");
+
+    const right = await call(null, "POST", `/api/portals/${portalId}/unlock`, { accessToken: ACCESS });
+    expect(right.status).toBe(200);
+    expect(await right.json()).toMatchObject({ id: portalId, accepting: true, keyVersion: 1 });
+
+    const list = (await (await call(cookie, "GET", "/api/portals")).json()) as {
+      portals: { hasPassword: boolean }[];
+    };
+    expect(list.portals[0].hasPassword).toBe(true);
+  });
+
+  it("refuses a deposit without the token and takes one with it", async () => {
+    const { portalId } = await locked();
+    const bare = await call(null, "POST", `/api/portals/${portalId}/deposits`, { depositToken: TOKEN });
+    expect(bare.status).toBe(403);
+    expect(((await bare.json()) as { code: string }).code).toBe("password_wrong");
+    const wrong = await call(null, "POST", `/api/portals/${portalId}/deposits`, {
+      depositToken: TOKEN,
+      accessToken: WRONG,
+    });
+    expect(wrong.status).toBe(403);
+    const ok = await call(null, "POST", `/api/portals/${portalId}/deposits`, {
+      depositToken: TOKEN,
+      accessToken: ACCESS,
+    });
+    expect(ok.status).toBe(201);
+  });
+
+  it("stores only a hash, and can be taken off again", async () => {
+    const { cookie, portalId } = await locked();
+    const [row] = await db.select().from(portals).where(eq(portals.id, portalId));
+    expect(row.accessHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(row.accessHash).not.toContain(Buffer.from(ACCESS, "base64url").toString("hex"));
+
+    await call(cookie, "PATCH", `/api/portals/${portalId}`, { accessToken: null });
+    const open = (await (await call(null, "GET", `/api/portals/${portalId}/public`)).json()) as {
+      locked?: boolean;
+      accepting: boolean;
+    };
+    expect(open.locked).toBeUndefined();
+    expect(open.accepting).toBe(true);
+    expect((await startDeposit(portalId)).res.status).toBe(201);
+  });
+
+  it("leaves a portal without a password open to unlock with anything", async () => {
+    const { portalId } = await ownerWithPortal();
+    const res = await call(null, "POST", `/api/portals/${portalId}/unlock`, { accessToken: WRONG });
+    expect(res.status).toBe(200);
+  });
+
+  it("limits how often one source can try", async () => {
+    const { portalId } = await locked();
+    let last = 0;
+    for (let i = 0; i < 21; i++) {
+      last = (await call(null, "POST", `/api/portals/${portalId}/unlock`, { accessToken: WRONG })).status;
+    }
+    expect(last).toBe(429);
+  });
+
+  it("refuses a malformed token and someone who does not own the portal", async () => {
+    const { cookie, portalId } = await ownerWithPortal();
+    expect((await call(cookie, "PATCH", `/api/portals/${portalId}`, { accessToken: "short" })).status).toBe(400);
+    const other = await createAuthedUser();
+    expect((await call(other.cookie, "PATCH", `/api/portals/${portalId}`, { accessToken: ACCESS })).status).toBe(404);
+  });
+});
