@@ -1,4 +1,4 @@
-import { eq, and, or, gt, lt, desc, sql, notExists, inArray } from 'drizzle-orm';
+import { eq, and, or, gt, lt, desc, sql, notExists, inArray, count } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { db } from '../db';
 import { transfers, files, portals, transferEvents, type NewTransfer, type NewFile, type Transfer, type File } from '../db/schema';
@@ -447,6 +447,49 @@ export async function softDeleteOwnedTransfer(userId: string, transferId: string
     .returning({ id: transfers.id });
 
   return updated.length > 0;
+}
+
+/**
+ * Removes one file from a finished transfer of the user's: its stored
+ * bytes first, then its row. Taking the last file marks the transfer
+ * deleted. "not_found" covers not theirs, already gone and unfinished, so
+ * IDs cannot be probed; "storage" means nothing was changed.
+ */
+export async function deleteOwnedTransferFile(
+  userId: string,
+  transferId: string,
+  fileId: string,
+): Promise<{ ok: true; remaining: number } | { ok: false; reason: 'not_found' | 'storage' }> {
+  const [transfer] = await db
+    .select({ id: transfers.id })
+    .from(transfers)
+    .where(
+      and(
+        eq(transfers.id, transferId),
+        eq(transfers.userId, userId),
+        eq(transfers.isDeleted, false),
+        eq(transfers.isCompleted, true),
+      ),
+    )
+    .limit(1);
+  if (!transfer) return { ok: false, reason: 'not_found' };
+  const [file] = await db
+    .select()
+    .from(files)
+    .where(and(eq(files.id, fileId), eq(files.transferId, transferId), eq(files.isDeleted, false)))
+    .limit(1);
+  if (!file) return { ok: false, reason: 'not_found' };
+
+  if (!(await removeStoredFiles([file]))) return { ok: false, reason: 'storage' };
+  await deleteFileById(file.id);
+
+  const [left] = await db
+    .select({ n: count() })
+    .from(files)
+    .where(and(eq(files.transferId, transferId), eq(files.isDeleted, false)));
+  const remaining = Number(left?.n ?? 0);
+  if (remaining === 0) await softDeleteOwnedTransfer(userId, transferId);
+  return { ok: true, remaining };
 }
 
 // Owner-soft-deleted rows awaiting storage cleanup + hard-delete by the
