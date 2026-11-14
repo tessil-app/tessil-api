@@ -34,7 +34,10 @@ export type AuthEventType =
   | "portal_shared"
   | "portal_unshared"
   | "vault_password_changed"
-  | "vault_phrase_regenerated";
+  | "vault_phrase_regenerated"
+  | "device_approved"
+  | "device_changed"
+  | "device_revoked";
 
 interface LogAuthEventInput {
   eventType: AuthEventType;

@@ -17,6 +17,7 @@ import {
 import { resolveCaps } from '../config/tiers';
 import { findUserById } from '../auth/users';
 import { claimDeliveryNotice, getPortal } from '../services/portal.service';
+import { deviceAccess } from '../auth/deviceAuth';
 import { sendPortalNotice } from '../services/email.service';
 import type { User } from '../db/schema';
 import { exceedsTotalLimit } from '../utils/limits';
@@ -78,11 +79,25 @@ function decodeBase64Url(input: string): Uint8Array | null {
 export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
   .use(authPlugin)
   .use(ipContextPlugin)
+  // An access key that may send acts as its account on these routes.
+  .use(deviceAccess('transfers:send'))
+  // It may only touch transfers it started itself. Anything else looks
+  // like it does not exist.
+  .onBeforeHandle(async ({ device, body, set }) => {
+    if (!device) return;
+    const transferId = (body as { transferId?: unknown } | null)?.transferId;
+    if (typeof transferId !== 'string') return;
+    const transfer = isValidNanoId(transferId) ? await getTransferById(transferId) : null;
+    if (!transfer || transfer.deviceId !== device.id) {
+      set.status = 404;
+      return { error: 'Transfer not found' };
+    }
+  })
 
   // Create a new transfer (group of files). If a session is present,
   // the transfer is owned by that user; otherwise it's anonymous
   // (user_id NULL). Ownership is set at creation and never re-assigned.
-  .post('/create-transfer', async ({ body, ipContext, me, set }) => {
+  .post('/create-transfer', async ({ body, ipContext, me, device, set }) => {
     const caps = resolveCaps(me);
 
     // Per-minute smoothing rate (not tier-aware — applies the same to
@@ -156,6 +171,7 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       me?.id ?? null,
       titleResult.value,
       passwordSalt,
+      device?.id ?? null,
     );
 
     return {

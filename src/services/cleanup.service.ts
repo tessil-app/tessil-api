@@ -1,3 +1,4 @@
+import { purgeDeadDevices } from "./device.service";
 import { lt, or, and, isNotNull } from 'drizzle-orm';
 import { getExpiredTransfers, getAbandonedTransfers, getSoftDeletedTransfers, deleteExpiredTransfer, abortTransfer, markOrphanedDepositsDeleted, purgeOwnerDeletedTransfer } from './file.service';
 import { db } from '../db';
@@ -38,6 +39,8 @@ export async function cleanupAbandonedTransfers(): Promise<number> {
 // expired-deletion path: removes R2 objects and hard-deletes the row.
 export async function cleanupSoftDeletedTransfers(): Promise<number> {
   await markOrphanedDepositsDeleted();
+  // Access keys nobody approved, and ones long stopped.
+  await purgeDeadDevices().catch((err) => console.error("[cleanup] access keys:", err));
   const rows = await getSoftDeletedTransfers();
   let count = 0;
 
