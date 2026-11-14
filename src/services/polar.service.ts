@@ -3,6 +3,7 @@
 // helpers. Webhook signatures use the standard-webhooks spec via
 // `validateEvent`.
 
+import type { PaidTier } from "../config/tiers";
 import { Polar } from "@polar-sh/sdk";
 import { validateEvent, WebhookVerificationError } from "@polar-sh/sdk/webhooks";
 import { env } from "../config/env";
@@ -35,16 +36,22 @@ export type BillingCycle = "monthly" | "annual";
  * `externalCustomerId` to our user ID so subsequent webhook events
  * can be routed back to the right user row.
  */
-export async function createProCheckout(
+/** Thrown when the product for a plan and cycle has not been configured. */
+export class CheckoutUnavailableError extends Error {}
+
+const PRODUCT_IDS: Record<PaidTier, Record<BillingCycle, () => string>> = {
+  pro: { monthly: () => env.POLAR_PRODUCT_ID_MONTHLY, annual: () => env.POLAR_PRODUCT_ID_ANNUAL },
+  max: { monthly: () => env.POLAR_PRODUCT_ID_MAX_MONTHLY, annual: () => env.POLAR_PRODUCT_ID_MAX_ANNUAL },
+};
+
+export async function createCheckout(
   user: User,
+  plan: PaidTier,
   cycle: BillingCycle,
 ): Promise<{ url: string; checkoutId: string }> {
-  const productId =
-    cycle === "monthly" ? env.POLAR_PRODUCT_ID_MONTHLY : env.POLAR_PRODUCT_ID_ANNUAL;
+  const productId = PRODUCT_IDS[plan][cycle]();
   if (!productId) {
-    throw new Error(
-      `POLAR_PRODUCT_ID_${cycle.toUpperCase()} is not set — billing cycle "${cycle}" cannot be checked out.`,
-    );
+    throw new CheckoutUnavailableError(`No product is configured for the ${plan} plan, ${cycle}.`);
   }
 
   const successUrl = env.POLAR_SUCCESS_URL || `${env.APP_URL.replace(/\/$/, "")}/dashboard/settings/account?upgraded=1`;
