@@ -80,6 +80,8 @@ function decodeBounded(input: string, min: number, max: number): Uint8Array | nu
 
 const b64 = (bytes: Uint8Array) => Buffer.from(bytes).toString("base64url");
 
+// base64url of the largest bundle, rounded up.
+const PUBLIC_BUNDLE_MAX_CHARS = Math.ceil((PUBLIC_BUNDLE_MAX_BYTES * 4) / 3) + 4;
 const NOT_FOUND = { error: "Portal not found" };
 
 // null or absent: no closing date. undefined: not a date.
@@ -174,7 +176,7 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
     {
       body: t.Object({
         id: t.String({ minLength: 21, maxLength: 21 }),
-        publicBundle: t.String({ maxLength: 12000 }),
+        publicBundle: t.String({ maxLength: PUBLIC_BUNDLE_MAX_CHARS }),
         sealedKeys: t.String({ maxLength: 2048 }),
         depositToken: t.String({ maxLength: 64 }),
         closesAt: t.Optional(t.Nullable(t.String({ maxLength: 40 }))),
@@ -274,7 +276,7 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
       params: t.Object({ id: t.String() }),
       body: t.Object({
         isDisabled: t.Optional(t.Boolean()),
-        publicBundle: t.Optional(t.String({ maxLength: 12000 })),
+        publicBundle: t.Optional(t.String({ maxLength: PUBLIC_BUNDLE_MAX_CHARS })),
         closesAt: t.Optional(t.Nullable(t.String({ maxLength: 40 }))),
         notifyOnDelivery: t.Optional(t.Boolean()),
       }),

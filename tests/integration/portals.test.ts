@@ -141,19 +141,19 @@ describe("creating a portal", () => {
     expect(malformed.status).toBe(400);
   });
 
-  it("accepts a bundle large enough for a list of requested items, and no larger", async () => {
+  it("accepts a bundle large enough for a list, texts and a small logo, and no larger", async () => {
     const { cookie } = await account("pro");
     const roomy = await call(cookie, "POST", "", {
       id: newId(),
-      publicBundle: b64(new Uint8Array(8000).fill(3)),
+      publicBundle: b64(new Uint8Array(32 * 1024).fill(3)),
       sealedKeys: SEALED,
       depositToken: TOKEN,
     });
     expect(roomy.status).toBe(201);
     const id = await createOne(cookie);
-    const grown = await call(cookie, "PATCH", `/${id}`, { publicBundle: b64(new Uint8Array(8000).fill(5)) });
+    const grown = await call(cookie, "PATCH", `/${id}`, { publicBundle: b64(new Uint8Array(32 * 1024).fill(5)) });
     expect(grown.status).toBe(200);
-    const tooBig = await call(cookie, "PATCH", `/${id}`, { publicBundle: b64(new Uint8Array(8300).fill(5)) });
+    const tooBig = await call(cookie, "PATCH", `/${id}`, { publicBundle: b64(new Uint8Array(32 * 1024 + 1).fill(5)) });
     expect(tooBig.status).toBe(400);
   });
 
