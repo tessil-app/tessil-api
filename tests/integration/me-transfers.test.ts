@@ -341,3 +341,62 @@ describe("Completed-transfer lifecycle vs. /me/transfers", () => {
 
 // Make TS happy about unused import.
 void files;
+
+describe("DELETE /api/me/transfers/:id/files/:fileId", () => {
+  async function finished(userId: string | undefined, fileCount: number) {
+    const t = await createTransfer(1, undefined, undefined, userId);
+    const ids: string[] = [];
+    for (let i = 0; i < fileCount; i++) ids.push((await seedFile(t.id)).id);
+    await completeTransfer(t.id);
+    return { transferId: t.id, fileIds: ids };
+  }
+  const del = (cookie: string, transferId: string, fileId: string) =>
+    app.handle(
+      authedRequest(cookie, `${APP_URL}/api/me/transfers/${transferId}/files/${fileId}`, {
+        method: "DELETE",
+        headers: ORIGIN_HEADER,
+      }),
+    );
+
+  it("removes one file and leaves the rest of the transfer", async () => {
+    const { user, cookie } = await createAuthedUser();
+    const { transferId, fileIds } = await finished(user.id, 2);
+    const res = await del(cookie, transferId, fileIds[0]);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ remaining: 1 });
+    const rows = await db.select().from(files).where(eq(files.transferId, transferId));
+    expect(rows.map((r) => r.id)).toEqual([fileIds[1]]);
+    const [t] = await db.select().from(transfers).where(eq(transfers.id, transferId));
+    expect(t.isDeleted).toBe(false);
+  });
+
+  it("marks the transfer deleted when its last file goes", async () => {
+    const { user, cookie } = await createAuthedUser();
+    const { transferId, fileIds } = await finished(user.id, 1);
+    expect(await (await del(cookie, transferId, fileIds[0])).json()).toEqual({ remaining: 0 });
+    const [t] = await db.select().from(transfers).where(eq(transfers.id, transferId));
+    expect(t.isDeleted).toBe(true);
+  });
+
+  it("answers 404 to someone else, to a file of another transfer, and twice", async () => {
+    const { user, cookie } = await createAuthedUser();
+    const { cookie: stranger } = await createAuthedUser();
+    const a = await finished(user.id, 2);
+    const b = await finished(user.id, 1);
+    expect((await del(stranger, a.transferId, a.fileIds[0])).status).toBe(404);
+    expect((await del(cookie, a.transferId, b.fileIds[0])).status).toBe(404);
+    expect((await del(cookie, a.transferId, a.fileIds[0])).status).toBe(200);
+    expect((await del(cookie, a.transferId, a.fileIds[0])).status).toBe(404);
+    expect(await db.select().from(files).where(eq(files.transferId, b.transferId))).toHaveLength(1);
+  });
+
+  it("requires a session", async () => {
+    const res = await app.handle(
+      new Request(`${APP_URL}/api/me/transfers/${"a".repeat(21)}/files/${"b".repeat(21)}`, {
+        method: "DELETE",
+        headers: ORIGIN_HEADER,
+      }),
+    );
+    expect(res.status).toBe(401);
+  });
+});

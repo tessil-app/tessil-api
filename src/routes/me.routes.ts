@@ -9,7 +9,7 @@ import { logAuthEvent } from "../auth/events";
 import { buildAccountExport, eraseAccount } from "../auth/users";
 import { SESSION_COOKIE_NAME, SESSION_COOKIE_OPTIONS } from "../auth/sessions";
 import { normaliseEmail } from "../auth/tokens";
-import { getFileMetadataForOwnedTransfer, getStoredBytes, listTransfersForUser, setOwnedTransferTitle, softDeleteOwnedTransfer } from "../services/file.service";
+import { getFileMetadataForOwnedTransfer, getStoredBytes, listTransfersForUser, setOwnedTransferTitle, softDeleteOwnedTransfer, deleteOwnedTransferFile } from "../services/file.service";
 import { sendAccountDeletedNotification } from "../services/email.service";
 import {
   checkRateLimit,
@@ -281,6 +281,40 @@ export const meRoutes = new Elysia({ prefix: "/api/me" })
 
       set.status = 204;
       return null;
+    },
+  )
+
+  // One file out of a finished transfer. The last one takes the transfer with it.
+  .delete(
+    "/transfers/:id/files/:fileId",
+    async ({ me, params, originRejected, set }) => {
+      if (originRejected) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
+      if (!me) {
+        set.status = 401;
+        return { error: "Not authenticated" };
+      }
+      const deleteLimit = await checkRateLimit(me.id, rateLimiters.meTransfersDelete);
+      if (!deleteLimit.allowed) {
+        set.status = 429;
+        set.headers["Retry-After"] = String(deleteLimit.resetIn);
+        return { error: "Rate limit exceeded. Try again later." };
+      }
+      if (!NANOID_PATTERN.test(params.id) || !NANOID_PATTERN.test(params.fileId)) {
+        set.status = 404;
+        return { error: "Not found" };
+      }
+
+      const result = await deleteOwnedTransferFile(me.id, params.id, params.fileId);
+      if (!result.ok) {
+        set.status = result.reason === "storage" ? 502 : 404;
+        return {
+          error: result.reason === "storage" ? "Could not remove the file. Try again." : "Not found",
+        };
+      }
+      return { remaining: result.remaining };
     },
   )
 
