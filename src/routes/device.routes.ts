@@ -258,12 +258,12 @@ export const deviceRoutes = new Elysia({ prefix: "/api/devices" })
 
   .post(
     "/approve",
-    async ({ me, body, ipContext, originRejected, request, set }) => {
+    async ({ me, sessionId, body, ipContext, originRejected, request, set }) => {
       if (originRejected) {
         set.status = 403;
         return { error: "Forbidden" };
       }
-      if (!me) {
+      if (!me || !sessionId) {
         set.status = 401;
         return { error: "Not authenticated" };
       }
@@ -285,8 +285,12 @@ export const deviceRoutes = new Elysia({ prefix: "/api/devices" })
         set.status = 400;
         return { error: "Choose at least one thing this access key may do.", code: "device_no_permissions" };
       }
-      const result = await approveDevice(me.id, code, caps.maxDevices, permissions, name);
+      const result = await approveDevice(me.id, sessionId, code, caps.maxDevices, permissions, name);
       if (!result.ok) {
+        if (result.reason === "signed_out") {
+          set.status = 401;
+          return { error: "Not authenticated" };
+        }
         if (result.reason === "limit_reached") {
           set.status = 409;
           return {

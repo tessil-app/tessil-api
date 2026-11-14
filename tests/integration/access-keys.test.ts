@@ -440,6 +440,40 @@ describe("signing out everywhere", () => {
   });
 });
 
+describe("signing out everywhere while a key is being approved", () => {
+  it("never leaves a working key behind, whichever lands first", async () => {
+    for (let round = 0; round < 8; round++) {
+      // Registering is limited per source; every round here is one source.
+      await resetRateLimits();
+      const owner = await person("max");
+      const pending = await Promise.all(Array.from({ length: 4 }, () => register()));
+      await Promise.all([
+        ...pending.map((d) =>
+          asPerson(owner.cookie, "POST", "/api/devices/approve", { code: d.pairingCode, permissions: ["transfers:send"] }),
+        ),
+        asPerson(owner.cookie, "POST", "/api/auth/logout-all"),
+      ]);
+      for (const d of pending) {
+        const status = (await asDevice(d.token, "GET", "/api/devices/self")).status;
+        const body = status === 200 ? ((await (await asDevice(d.token, "GET", "/api/devices/self")).json()) as { status: string }).status : "refused";
+        // Still pending or refused. Never active.
+        expect(body).not.toBe("active");
+      }
+    }
+  });
+
+  it("refuses an approval whose session was revoked after it was read", async () => {
+    const owner = await person("pro");
+    const d = await register();
+    const { approveDevice } = await import("../../src/services/device.service");
+    const { sessions } = await import("../../src/db/schema");
+    const [session] = await db.select().from(sessions).where(eq(sessions.userId, owner.user.id));
+    await db.update(sessions).set({ revokedAt: new Date() }).where(eq(sessions.id, session.id));
+    const result = await approveDevice(owner.user.id, session.id, d.pairingCode.replace("-", ""), 3, ["transfers:send"]);
+    expect(result).toEqual({ ok: false, reason: "signed_out" });
+  });
+});
+
 describe("cleaning up", () => {
   it("removes pending keys nobody approved and keys long stopped, and keeps the rest", async () => {
     const stale = await register();

@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import { and, desc, eq, gt, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { db } from "../db";
-import { devices, type Device } from "../db/schema";
+import { devices, sessions, type Device } from "../db/schema";
 
 export const DEVICE_PERMISSIONS = [
   "transfers:send",
@@ -125,16 +125,29 @@ export async function findPendingByCode(code: string): Promise<Device | null> {
  * Gives a pending device to `userId`. The count and the update share a
  * transaction and a per-account lock, so parallel approvals cannot go past
  * the plan's number of keys.
+ *
+ * The approving session is looked at again under that lock. "Sign out
+ * everywhere" revokes sessions first and keys second, under the same lock,
+ * so an approval already on its way either finishes before the keys are
+ * revoked, and is caught, or finds its session revoked and stops here.
  */
 export async function approveDevice(
   userId: string,
+  sessionId: string,
   code: string,
   maxDevices: number,
   permissions: DevicePermission[],
   name?: string,
-): Promise<{ ok: true; device: Device } | { ok: false; reason: "not_found" | "limit_reached" }> {
+): Promise<{ ok: true; device: Device } | { ok: false; reason: "not_found" | "limit_reached" | "signed_out" }> {
   return db.transaction(async (tx) => {
     await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`devices:${userId}`}, 0))`);
+    const [session] = await tx
+      .select({ id: sessions.id })
+      .from(sessions)
+      .where(and(eq(sessions.id, sessionId), eq(sessions.userId, userId), isNull(sessions.revokedAt)))
+      .limit(1);
+    if (!session) return { ok: false as const, reason: "signed_out" as const };
+
     const [active] = await tx
       .select({ n: sql<number>`count(*)` })
       .from(devices)
@@ -216,14 +229,21 @@ export async function updateOwnedDevice(
  * Stops every key of an account. Part of "sign out everywhere": whoever
  * got into the account may have approved a key of their own, and a key
  * outlives the session that approved it.
+ *
+ * Call it after the sessions are revoked. It waits for the account's lock,
+ * so an approval in flight has either committed, and is revoked here, or
+ * has yet to check its session, and will find it gone.
  */
 export async function revokeAllDevicesForUser(userId: string): Promise<number> {
-  const updated = await db
-    .update(devices)
-    .set({ revokedAt: new Date() })
-    .where(and(eq(devices.userId, userId), isNull(devices.revokedAt)))
-    .returning({ id: devices.id });
-  return updated.length;
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`devices:${userId}`}, 0))`);
+    const updated = await tx
+      .update(devices)
+      .set({ revokedAt: new Date() })
+      .where(and(eq(devices.userId, userId), isNull(devices.revokedAt)))
+      .returning({ id: devices.id });
+    return updated.length;
+  });
 }
 
 /** Stops a key at once. False when it is not theirs or was already stopped. */
