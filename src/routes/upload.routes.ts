@@ -16,7 +16,8 @@ import {
 } from '../services/ratelimit.service';
 import { resolveCaps } from '../config/tiers';
 import { findUserById } from '../auth/users';
-import { getPortal } from '../services/portal.service';
+import { claimDeliveryNotice, getPortal } from '../services/portal.service';
+import { sendPortalNotice } from '../services/email.service';
 import type { User } from '../db/schema';
 import { exceedsTotalLimit } from '../utils/limits';
 import { authPlugin } from '../auth/middleware';
@@ -50,6 +51,17 @@ async function depositTarget(portalId: string): Promise<{ owner: User } | null> 
   const owner = await findUserById(portal.ownerId);
   if (!owner || owner.deletedAt || resolveCaps(owner).maxPortals === 0) return null;
   return { owner };
+}
+
+// Tells a portal's members that files arrived, when its owner asked for
+// that. Never throws: the delivery has already succeeded.
+async function notifyOfDelivery(portalId: string): Promise<void> {
+  try {
+    const recipients = await claimDeliveryNotice(portalId);
+    await Promise.all(recipients.map((to) => sendPortalNotice({ kind: 'delivery', to, portalId })));
+  } catch (err) {
+    console.error('[portal] delivery notice failed', err instanceof Error ? err.message : err);
+  }
 }
 
 function decodeBase64Url(input: string): Uint8Array | null {
@@ -553,6 +565,7 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
       return { error: 'Transfer changed while completing. Please retry.' };
     }
     logCompletedTransfer(transfer).catch(() => {}); // fire-and-forget, never blocks response
+    if (transfer.portalId) void notifyOfDelivery(transfer.portalId);
 
     return {
       success: true,

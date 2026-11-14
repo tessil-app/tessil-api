@@ -363,6 +363,11 @@ export const portals = pgTable('portals', {
   keyVersion: integer('key_version').default(1).notNull(),
   // Owner's switch to stop new deposits without deleting anything.
   isDisabled: boolean('is_disabled').default(false).notNull(),
+  // After this moment no new deposit can start. Null: open until switched off.
+  closesAt: timestamp('closes_at', { withTimezone: true }),
+  // Email the members when a deposit arrives, at most once an hour.
+  notifyOnDelivery: boolean('notify_on_delivery').default(false).notNull(),
+  lastNotifiedAt: timestamp('last_notified_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
 }, (table) => ({
   ownerIdx: index('portals_owner_id_idx').on(table.ownerId),

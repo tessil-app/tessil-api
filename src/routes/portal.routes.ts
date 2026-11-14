@@ -57,6 +57,7 @@ import {
   deletePortalInvite,
   depositTokenMatches,
   getPortalSharing,
+  isClosed,
   removeGuest,
   replaceOwnMemberKeys,
   getMemberRole,
@@ -66,6 +67,7 @@ import {
   markPortalSeen,
   portalStatsForMember,
   updateOwnedPortal,
+  type PortalSwitches,
 } from "../services/portal.service";
 
 const NANOID_PATTERN = /^[A-Za-z0-9_-]{21}$/;
@@ -79,6 +81,13 @@ function decodeBounded(input: string, min: number, max: number): Uint8Array | nu
 const b64 = (bytes: Uint8Array) => Buffer.from(bytes).toString("base64url");
 
 const NOT_FOUND = { error: "Portal not found" };
+
+// null or absent: no closing date. undefined: not a date.
+function parseClosesAt(input: string | null | undefined): Date | null | undefined {
+  if (input === null || input === undefined) return null;
+  const at = new Date(input);
+  return Number.isNaN(at.getTime()) ? undefined : at;
+}
 const DEPOSIT_PAGE_SIZE = 30;
 
 export const portalRoutes = new Elysia({ prefix: "/api/portals" })
@@ -127,12 +136,18 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
         return { error: "Malformed portal payload." };
       }
 
-      const result = await createPortal(me.id, caps.maxPortals, {
-        id: body.id,
-        publicBundle,
-        sealedKeys,
-        depositToken,
-      });
+      const closesAt = parseClosesAt(body.closesAt);
+      if (closesAt === undefined) {
+        set.status = 400;
+        return { error: "closesAt must be a date and time, or null." };
+      }
+
+      const result = await createPortal(
+        me.id,
+        caps.maxPortals,
+        { id: body.id, publicBundle, sealedKeys, depositToken },
+        { closesAt, notifyOnDelivery: body.notifyOnDelivery },
+      );
       if (!result.ok) {
         set.status = 409;
         return result.reason === "limit_reached"
@@ -162,6 +177,8 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
         publicBundle: t.String({ maxLength: 12000 }),
         sealedKeys: t.String({ maxLength: 2048 }),
         depositToken: t.String({ maxLength: 64 }),
+        closesAt: t.Optional(t.Nullable(t.String({ maxLength: 40 }))),
+        notifyOnDelivery: t.Optional(t.Boolean()),
       }),
     },
   )
@@ -187,6 +204,8 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
         sealedKeys: b64(row.sealedKeys),
         keyVersion: row.keyVersion,
         isDisabled: row.isDisabled,
+        closesAt: row.closesAt?.toISOString() ?? null,
+        notifyOnDelivery: row.notifyOnDelivery,
         createdAt: row.createdAt.toISOString(),
         // Live deliveries. `unseen` arrived after this member last looked.
         deliveries: stats.get(row.id)?.deliveries ?? 0,
@@ -220,8 +239,17 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
         return { error: "Rate limit exceeded. Try again later." };
       }
 
-      const changes: { isDisabled?: boolean; publicBundle?: Uint8Array } = {};
+      const changes: { isDisabled?: boolean; publicBundle?: Uint8Array } & PortalSwitches = {};
       if (body.isDisabled !== undefined) changes.isDisabled = body.isDisabled;
+      if (body.notifyOnDelivery !== undefined) changes.notifyOnDelivery = body.notifyOnDelivery;
+      if (body.closesAt !== undefined) {
+        const closesAt = parseClosesAt(body.closesAt);
+        if (closesAt === undefined) {
+          set.status = 400;
+          return { error: "closesAt must be a date and time, or null." };
+        }
+        changes.closesAt = closesAt;
+      }
       if (body.publicBundle !== undefined) {
         const bundle = decodeBounded(body.publicBundle, PUBLIC_BUNDLE_MIN_BYTES, PUBLIC_BUNDLE_MAX_BYTES);
         if (!bundle) {
@@ -247,6 +275,8 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
       body: t.Object({
         isDisabled: t.Optional(t.Boolean()),
         publicBundle: t.Optional(t.String({ maxLength: 12000 })),
+        closesAt: t.Optional(t.Nullable(t.String({ maxLength: 40 }))),
+        notifyOnDelivery: t.Optional(t.Boolean()),
       }),
     },
   )
@@ -309,13 +339,15 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
       // depositor gets an explanation, not a dead link.
       const owner = await findUserById(portal.ownerId);
       const ownerCaps = resolveCaps(owner && !owner.deletedAt ? owner : null);
-      const accepting = !portal.isDisabled && ownerCaps.maxPortals > 0;
+      const accepting = !portal.isDisabled && !isClosed(portal) && ownerCaps.maxPortals > 0;
 
       return {
         id: portal.id,
         publicBundle: b64(portal.publicBundle),
         keyVersion: portal.keyVersion,
         accepting,
+        // So the page can say until when, or that the date has passed.
+        closesAt: portal.closesAt?.toISOString() ?? null,
         // So the deposit page can say what fits before anything is uploaded.
         maxFileSize: ownerCaps.maxFileSize,
         maxTotalSize: ownerCaps.maxTransferSize,
@@ -359,6 +391,11 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
       if (portal.isDisabled || ownerCaps.maxPortals === 0 || ownerCaps.depositRetentionDays === null) {
         set.status = 403;
         return { error: "This portal is not accepting files right now.", code: "portal_not_accepting" };
+      }
+      // Only starting is refused: a deposit begun in time may finish.
+      if (isClosed(portal)) {
+        set.status = 403;
+        return { error: "This portal has closed.", code: "portal_closed" };
       }
 
       const perPortal = await checkRateLimit(portal.id, rateLimiters.portalDepositPerPortal);

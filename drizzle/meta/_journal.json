@@ -155,6 +155,13 @@
       "when": 1794602042941,
       "tag": "0021_portal_member_last_seen",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1794664665250,
+      "tag": "0022_portal_closing_and_notices",
+      "breakpoints": true
     }
   ]
 }

@@ -39,7 +39,20 @@ export interface PortalForMember {
   sealedKeys: Uint8Array;
   keyVersion: number;
   isDisabled: boolean;
+  closesAt: Date | null;
+  notifyOnDelivery: boolean;
   createdAt: Date;
+}
+
+/** What an owner can set that the server acts on. */
+export interface PortalSwitches {
+  closesAt?: Date | null;
+  notifyOnDelivery?: boolean;
+}
+
+/** True once the portal's closing moment has passed. */
+export function isClosed(portal: Pick<Portal, "closesAt">, now = new Date()): boolean {
+  return portal.closesAt !== null && portal.closesAt.getTime() <= now.getTime();
 }
 
 export async function countOwnedPortals(userId: string): Promise<number> {
@@ -57,6 +70,7 @@ export async function createPortal(
   ownerId: string,
   maxPortals: number,
   blobs: { id: string; publicBundle: Uint8Array; sealedKeys: Uint8Array; depositToken: Uint8Array },
+  switches: PortalSwitches = {},
 ): Promise<{ ok: true; portal: Portal } | { ok: false; reason: "limit_reached" | "id_taken" }> {
   return db.transaction(async (tx) => {
     await tx.execute(
@@ -72,6 +86,8 @@ export async function createPortal(
         ownerId,
         publicBundle: blobs.publicBundle,
         depositTokenHash: hashDepositToken(blobs.depositToken),
+        ...(switches.closesAt ? { closesAt: switches.closesAt } : {}),
+        ...(switches.notifyOnDelivery ? { notifyOnDelivery: true } : {}),
       })
       .onConflictDoNothing({ target: portals.id })
       .returning();
@@ -97,6 +113,8 @@ export async function listPortalsForMember(userId: string): Promise<PortalForMem
       sealedKeys: portalMembers.sealedKeys,
       keyVersion: portals.keyVersion,
       isDisabled: portals.isDisabled,
+      closesAt: portals.closesAt,
+      notifyOnDelivery: portals.notifyOnDelivery,
       createdAt: portals.createdAt,
       ownerId: portals.ownerId,
       ownerEmail: users.email,
@@ -123,7 +141,7 @@ export async function getPortal(id: string): Promise<Portal | null> {
 export async function updateOwnedPortal(
   ownerId: string,
   portalId: string,
-  changes: { isDisabled?: boolean; publicBundle?: Uint8Array },
+  changes: { isDisabled?: boolean; publicBundle?: Uint8Array } & PortalSwitches,
 ): Promise<boolean> {
   const updated = await db
     .update(portals)
@@ -131,6 +149,35 @@ export async function updateOwnedPortal(
     .where(and(eq(portals.id, portalId), eq(portals.ownerId, ownerId)))
     .returning({ id: portals.id });
   return updated.length > 0;
+}
+
+const NOTICE_INTERVAL = sql`interval '1 hour'`;
+
+/**
+ * Claims the right to email a portal's members about a delivery, and
+ * returns their addresses. Empty when notices are off or one went out
+ * within the hour, so a burst of deliveries is one email. The claim is a
+ * single conditional update: parallel deliveries cannot both win it.
+ */
+export async function claimDeliveryNotice(portalId: string): Promise<string[]> {
+  const claimed = await db
+    .update(portals)
+    .set({ lastNotifiedAt: sql`now()` })
+    .where(
+      and(
+        eq(portals.id, portalId),
+        eq(portals.notifyOnDelivery, true),
+        sql`(${portals.lastNotifiedAt} IS NULL OR ${portals.lastNotifiedAt} < now() - ${NOTICE_INTERVAL})`,
+      ),
+    )
+    .returning({ id: portals.id });
+  if (claimed.length === 0) return [];
+  const rows = await db
+    .select({ email: users.email })
+    .from(portalMembers)
+    .innerJoin(users, eq(users.id, portalMembers.userId))
+    .where(and(eq(portalMembers.portalId, portalId), sql`${users.deletedAt} IS NULL`));
+  return rows.map((r) => r.email);
 }
 
 /**

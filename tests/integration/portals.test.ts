@@ -206,6 +206,7 @@ describe("the public read", () => {
       publicBundle: BUNDLE,
       keyVersion: 1,
       accepting: true,
+      closesAt: null,
       maxFileSize: 5 * 1024 ** 3,
       maxTotalSize: 10 * 1024 ** 3,
     });
