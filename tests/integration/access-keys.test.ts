@@ -399,6 +399,47 @@ describe("managing keys as a person", () => {
   });
 });
 
+describe("limits that must hold under pressure", () => {
+  it("does not let renewals bring back more keys than the plan includes", async () => {
+    const owner = await person("pro");
+    const made = [];
+    for (let i = 0; i < 6; i++) {
+      const d = await register(`key ${i}`);
+      // Lapsed keys do not count, so all six can be approved one after another.
+      await asPerson(owner.cookie, "POST", "/api/devices/approve", { code: d.pairingCode, permissions: ["transfers:send"] });
+      await db.update(devices).set({ expiresAt: new Date(Date.now() - 1000) }).where(eq(devices.id, d.id));
+      made.push(d);
+    }
+    const results = await Promise.all(
+      made.map((d) => asPerson(owner.cookie, "PATCH", `/api/devices/${d.id}`, { renew: true })),
+    );
+    expect(results.filter((r) => r.status === 200)).toHaveLength(3);
+    expect(results.filter((r) => r.status === 409)).toHaveLength(3);
+    const active = (await db.select().from(devices).where(eq(devices.userId, owner.user.id))).filter(
+      (d) => d.expiresAt! > new Date(),
+    );
+    expect(active).toHaveLength(3);
+  });
+
+  it("lets an active key be renewed when the plan is full", async () => {
+    const owner = await person("free");
+    const d = await register();
+    await asPerson(owner.cookie, "POST", "/api/devices/approve", { code: d.pairingCode, permissions: ["transfers:send"] });
+    expect((await asPerson(owner.cookie, "PATCH", `/api/devices/${d.id}`, { renew: true })).status).toBe(200);
+  });
+});
+
+describe("signing out everywhere", () => {
+  it("stops every access key of the account, and nobody else's", async () => {
+    const mine = await approved(["transfers:send"]);
+    const theirs = await approved(["transfers:send"]);
+    const res = await asPerson(mine.owner.cookie, "POST", "/api/auth/logout-all");
+    expect(await res.json()).toMatchObject({ ok: true, devicesRevoked: 1 });
+    expect((await asDevice(mine.device.token, "GET", "/api/devices/self")).status).toBe(401);
+    expect((await asDevice(theirs.device.token, "GET", "/api/devices/self")).status).toBe(200);
+  });
+});
+
 describe("cleaning up", () => {
   it("removes pending keys nobody approved and keys long stopped, and keeps the rest", async () => {
     const stale = await register();

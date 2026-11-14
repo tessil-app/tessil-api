@@ -15,7 +15,6 @@ import {
   approveDevice,
   canonicalisePairingCode,
   cleanPermissions,
-  countActiveDevices,
   findPendingByCode,
   isActive,
   listDevices,
@@ -357,10 +356,9 @@ export const deviceRoutes = new Elysia({ prefix: "/api/devices" })
         set.status = 400;
         return { error: "Nothing to change." };
       }
-      // Renewing a lapsed key brings it back among the active ones.
-      if (body.renew && (await countActiveDevices(me.id)) >= caps.maxDevices) {
-        const mine = (await listDevices(me.id)).find((d) => d.id === params.id);
-        if (mine && !isActive(mine)) {
+      const result = await updateOwnedDevice(me.id, params.id, caps.maxDevices, { name, permissions, renew: body.renew });
+      if (!result.ok) {
+        if (result.reason === "limit_reached") {
           set.status = 409;
           return {
             error: `Your plan includes ${caps.maxDevices} access ${caps.maxDevices === 1 ? "key" : "keys"}. Revoke one first.`,
@@ -368,12 +366,10 @@ export const deviceRoutes = new Elysia({ prefix: "/api/devices" })
             upgradeUrl: "/pricing",
           };
         }
-      }
-      const device = await updateOwnedDevice(me.id, params.id, { name, permissions, renew: body.renew });
-      if (!device) {
         set.status = 404;
         return NOT_FOUND;
       }
+      const device = result.device;
       await logAuthEvent({
         eventType: "device_changed",
         userId: me.id,

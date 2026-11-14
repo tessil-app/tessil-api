@@ -121,14 +121,6 @@ export async function findPendingByCode(code: string): Promise<Device | null> {
   return row ?? null;
 }
 
-export async function countActiveDevices(userId: string): Promise<number> {
-  const [row] = await db
-    .select({ n: sql<number>`count(*)` })
-    .from(devices)
-    .where(and(eq(devices.userId, userId), isNull(devices.revokedAt), gt(devices.expiresAt, new Date())));
-  return Number(row?.n ?? 0);
-}
-
 /**
  * Gives a pending device to `userId`. The count and the update share a
  * transaction and a per-account lock, so parallel approvals cannot go past
@@ -179,22 +171,59 @@ export async function listDevices(userId: string): Promise<Device[]> {
   return db.select().from(devices).where(eq(devices.userId, userId)).orderBy(desc(devices.createdAt));
 }
 
-/** Owner-scoped change. Null when it is not theirs or no longer usable. */
+/**
+ * Owner-scoped change. Renewing a lapsed key puts it back among the active
+ * ones, so that is checked against the plan under the same per-account
+ * lock as an approval: two renewals at once cannot both slip through.
+ */
 export async function updateOwnedDevice(
   userId: string,
   deviceId: string,
+  maxDevices: number,
   changes: { name?: string; permissions?: DevicePermission[]; renew?: boolean },
-): Promise<Device | null> {
-  const [device] = await db
+): Promise<{ ok: true; device: Device } | { ok: false; reason: "not_found" | "limit_reached" }> {
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`devices:${userId}`}, 0))`);
+    const [current] = await tx
+      .select()
+      .from(devices)
+      .where(and(eq(devices.id, deviceId), eq(devices.userId, userId), isNull(devices.revokedAt)))
+      .limit(1);
+    if (!current) return { ok: false as const, reason: "not_found" as const };
+
+    if (changes.renew && !isActive(current)) {
+      const [active] = await tx
+        .select({ n: sql<number>`count(*)` })
+        .from(devices)
+        .where(and(eq(devices.userId, userId), isNull(devices.revokedAt), gt(devices.expiresAt, new Date())));
+      if (Number(active?.n ?? 0) >= maxDevices) return { ok: false as const, reason: "limit_reached" as const };
+    }
+
+    const [device] = await tx
+      .update(devices)
+      .set({
+        ...(changes.name !== undefined ? { name: changes.name } : {}),
+        ...(changes.permissions !== undefined ? { permissions: changes.permissions } : {}),
+        ...(changes.renew ? { expiresAt: new Date(Date.now() + DEVICE_LIFETIME_DAYS * 86_400_000) } : {}),
+      })
+      .where(eq(devices.id, deviceId))
+      .returning();
+    return { ok: true as const, device };
+  });
+}
+
+/**
+ * Stops every key of an account. Part of "sign out everywhere": whoever
+ * got into the account may have approved a key of their own, and a key
+ * outlives the session that approved it.
+ */
+export async function revokeAllDevicesForUser(userId: string): Promise<number> {
+  const updated = await db
     .update(devices)
-    .set({
-      ...(changes.name !== undefined ? { name: changes.name } : {}),
-      ...(changes.permissions !== undefined ? { permissions: changes.permissions } : {}),
-      ...(changes.renew ? { expiresAt: new Date(Date.now() + DEVICE_LIFETIME_DAYS * 86_400_000) } : {}),
-    })
-    .where(and(eq(devices.id, deviceId), eq(devices.userId, userId), isNull(devices.revokedAt)))
-    .returning();
-  return device ?? null;
+    .set({ revokedAt: new Date() })
+    .where(and(eq(devices.userId, userId), isNull(devices.revokedAt)))
+    .returning({ id: devices.id });
+  return updated.length;
 }
 
 /** Stops a key at once. False when it is not theirs or was already stopped. */
