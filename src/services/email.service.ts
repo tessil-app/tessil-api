@@ -385,7 +385,9 @@ export type PortalNotice =
   /** To the owner: the invitee now has a vault, so access can be given. */
   | { kind: "invitee_ready"; to: string; inviteeEmail: string; portalId: string }
   /** To the guest: the owner handed over access. */
-  | { kind: "access_given"; to: string; ownerEmail: string };
+  | { kind: "access_given"; to: string; ownerEmail: string }
+  /** To a member: files arrived in a portal that has arrival emails on. */
+  | { kind: "delivery"; to: string; portalId: string };
 
 interface NoticeContent {
   subject: string;
@@ -429,6 +431,18 @@ export function buildPortalNotice(notice: PortalNotice): NoticeContent {
         ],
         button: { label: "View your portals", url: portals },
         footnote: `If you don't know ${notice.ownerEmail}, you can decline it there.`,
+      };
+    case "delivery":
+      return {
+        subject: "New files in one of your Tessil portals",
+        heading: "New files arrived",
+        paragraphs: [
+          "Someone sent files through one of your portals. Open it to see what came in.",
+          "We can't tell you which portal by name or what was sent: both are encrypted and only you can read them.",
+        ],
+        button: { label: "Open the portal", url: `${portals}/${notice.portalId}` },
+        footnote:
+          "At most one of these per portal per hour. The portal's owner can switch them off in its settings.",
       };
   }
 }

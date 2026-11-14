@@ -8,6 +8,7 @@ import { createApp } from "../../src/app";
 import { db } from "../../src/db";
 import { portalMembers, portals, transfers, users } from "../../src/db/schema";
 import { eraseAccount } from "../../src/auth/users";
+import { claimDeliveryNotice } from "../../src/services/portal.service";
 import { createFile, createTransfer, markOrphanedDepositsDeleted } from "../../src/services/file.service";
 import { peekVolumeLimit, rateLimiters, resetRateLimits } from "../../src/services/ratelimit.service";
 import { authedRequest, createAuthedUser, testIpContext } from "../helpers/auth";
@@ -455,5 +456,128 @@ describe("removing deposits", () => {
     await eraseAccount({ user, ipContext: testIpContext(), userAgent: null });
     expect(await isDeleted(transferId)).toBe(true);
     expect(await db.select().from(users).where(eq(users.id, user.id))).toHaveLength(0);
+  });
+});
+
+describe("a closing date", () => {
+  it("is off by default and shown to members and visitors once set", async () => {
+    const { cookie, portalId } = await ownerWithPortal();
+    const before = (await (await call(null, "GET", `/api/portals/${portalId}/public`)).json()) as {
+      accepting: boolean;
+      closesAt: string | null;
+    };
+    expect(before).toMatchObject({ accepting: true, closesAt: null });
+
+    const closesAt = new Date(Date.now() + 86_400_000).toISOString();
+    expect((await call(cookie, "PATCH", `/api/portals/${portalId}`, { closesAt })).status).toBe(200);
+    const open = (await (await call(null, "GET", `/api/portals/${portalId}/public`)).json()) as {
+      accepting: boolean;
+      closesAt: string | null;
+    };
+    expect(open).toMatchObject({ accepting: true, closesAt });
+    const list = (await (await call(cookie, "GET", "/api/portals")).json()) as {
+      portals: { closesAt: string | null; notifyOnDelivery: boolean }[];
+    };
+    expect(list.portals[0]).toMatchObject({ closesAt, notifyOnDelivery: false });
+    expect((await startDeposit(portalId)).res.status).toBe(201);
+  });
+
+  it("refuses a new deposit once passed, lets one already started finish, and can be lifted", async () => {
+    const { cookie, portalId } = await ownerWithPortal();
+    const started = await startDeposit(portalId);
+    const past = new Date(Date.now() - 1000).toISOString();
+    await call(cookie, "PATCH", `/api/portals/${portalId}`, { closesAt: past });
+
+    const refused = await startDeposit(portalId);
+    expect(refused.res.status).toBe(403);
+    expect(((await refused.res.json()) as { code: string }).code).toBe("portal_closed");
+    const shown = (await (await call(null, "GET", `/api/portals/${portalId}/public`)).json()) as {
+      accepting: boolean;
+    };
+    expect(shown.accepting).toBe(false);
+
+    const init = await call(null, "POST", "/api/upload/init-multipart", {
+      transferId: started.body.transferId,
+      size: 1024,
+      ...FILE_FIELDS,
+    });
+    expect(init.status).toBe(200);
+
+    await call(cookie, "PATCH", `/api/portals/${portalId}`, { closesAt: null });
+    expect((await startDeposit(portalId)).res.status).toBe(201);
+  });
+
+  it("refuses something that is not a date, and can be set at creation", async () => {
+    const { cookie, portalId } = await ownerWithPortal();
+    expect((await call(cookie, "PATCH", `/api/portals/${portalId}`, { closesAt: "soon" })).status).toBe(400);
+
+    const id = nanoid();
+    const closesAt = new Date(Date.now() + 3_600_000).toISOString();
+    const created = await call(cookie, "POST", "/api/portals", {
+      id,
+      publicBundle: b64(new Uint8Array(140).fill(3)),
+      sealedKeys: b64(new Uint8Array(200).fill(4)),
+      depositToken: TOKEN,
+      closesAt,
+      notifyOnDelivery: true,
+    });
+    expect(created.status).toBe(201);
+    const [row] = await db.select().from(portals).where(eq(portals.id, id));
+    expect(row.closesAt?.toISOString()).toBe(closesAt);
+    expect(row.notifyOnDelivery).toBe(true);
+  });
+
+  it("cannot be set by someone who does not own the portal", async () => {
+    const { portalId } = await ownerWithPortal();
+    const other = await createAuthedUser();
+    const res = await call(other.cookie, "PATCH", `/api/portals/${portalId}`, {
+      closesAt: new Date().toISOString(),
+      notifyOnDelivery: true,
+    });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("an email when files arrive", () => {
+  it("goes to nobody unless the owner switched it on", async () => {
+    const { portalId } = await ownerWithPortal();
+    expect(await claimDeliveryNotice(portalId)).toEqual([]);
+  });
+
+  it("goes to the members once, then waits an hour", async () => {
+    const { cookie, user, portalId } = await ownerWithPortal();
+    await call(cookie, "PATCH", `/api/portals/${portalId}`, { notifyOnDelivery: true });
+    expect(await claimDeliveryNotice(portalId)).toEqual([user.email]);
+    expect(await claimDeliveryNotice(portalId)).toEqual([]);
+
+    await db
+      .update(portals)
+      .set({ lastNotifiedAt: new Date(Date.now() - 61 * 60_000) })
+      .where(eq(portals.id, portalId));
+    expect(await claimDeliveryNotice(portalId)).toEqual([user.email]);
+  });
+
+  it("is claimed by only one of several deliveries landing together", async () => {
+    const { cookie, portalId } = await ownerWithPortal();
+    await call(cookie, "PATCH", `/api/portals/${portalId}`, { notifyOnDelivery: true });
+    const claims = await Promise.all(Array.from({ length: 8 }, () => claimDeliveryNotice(portalId)));
+    expect(claims.filter((c) => c.length > 0)).toHaveLength(1);
+  });
+
+  it("is claimed when a deposit completes", async () => {
+    const { cookie, portalId } = await ownerWithPortal();
+    await call(cookie, "PATCH", `/api/portals/${portalId}`, { notifyOnDelivery: true });
+    const { body } = await startDeposit(portalId);
+    await call(null, "POST", "/api/upload/init-multipart", { transferId: body.transferId, size: 1024, ...FILE_FIELDS });
+    const done = await call(null, "POST", "/api/upload/complete", { transferId: body.transferId, sealedKey: SEALED_KEY });
+    expect(done.status).toBe(200);
+    // The notice is sent after the response; give it a moment.
+    for (let i = 0; i < 20; i++) {
+      const [row] = await db.select().from(portals).where(eq(portals.id, portalId));
+      if (row.lastNotifiedAt) break;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    const [row] = await db.select().from(portals).where(eq(portals.id, portalId));
+    expect(row.lastNotifiedAt).not.toBeNull();
   });
 });
