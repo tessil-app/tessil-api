@@ -20,6 +20,7 @@ export async function createTransfer(
   userId?: string | null,
   title?: TransferTitleInput | null,
   passwordSalt?: string | null,
+  deviceId?: string | null,
 ): Promise<Transfer> {
   const id = nanoid();
   const expiresAt = new Date();
@@ -38,6 +39,7 @@ export async function createTransfer(
     userId: userId ?? null,
     encryptedTitle: title?.encryptedTitle ?? null,
     encryptedTitleIv: title?.encryptedTitleIv ?? null,
+    deviceId: deviceId ?? null,
   }).returning();
 
   return transfer;
@@ -329,6 +331,8 @@ export interface OwnedTransferSummary {
   wrappedKey: string | null;
   encryptedTitle: string | null;
   encryptedTitleIv: string | null;
+  /** The access key that sent it, if one did. Its wrapped key is that key's, not the vault's. */
+  deviceId: string | null;
 }
 
 function bytesToBase64Url(bytes: Uint8Array): string {
@@ -338,11 +342,15 @@ function bytesToBase64Url(bytes: Uint8Array): string {
 export async function listTransfersForUser(
   userId: string,
   cursor: Date | null,
-  limit: number
+  limit: number,
+  /** Only what this access key sent. */
+  deviceId?: string,
 ): Promise<OwnedTransferSummary[]> {
   const whereClauses = [
     eq(transfers.userId, userId),
     eq(transfers.isDeleted, false),
+    // Deposits sent to the account's portals are not its transfers.
+    ...(deviceId ? [eq(transfers.deviceId, deviceId)] : []),
   ];
   if (cursor) {
     whereClauses.push(lt(transfers.createdAt, cursor));
@@ -359,6 +367,7 @@ export async function listTransfersForUser(
       wrappedKey: transfers.wrappedKey,
       encryptedTitle: transfers.encryptedTitle,
       encryptedTitleIv: transfers.encryptedTitleIv,
+      deviceId: transfers.deviceId,
       fileCount: sql<number>`coalesce(count(${files.id}) filter (where ${files.isDeleted} = false), 0)`,
       totalBytes: sql<number>`coalesce(sum(${files.size}) filter (where ${files.isDeleted} = false), 0)`,
     })
@@ -379,6 +388,7 @@ export async function listTransfersForUser(
     wrappedKey: r.wrappedKey ? bytesToBase64Url(r.wrappedKey) : null,
     encryptedTitle: r.encryptedTitle,
     encryptedTitleIv: r.encryptedTitleIv,
+    deviceId: r.deviceId,
     // postgres.js returns bigint aggregates as strings — coerce explicitly
     fileCount: Number(r.fileCount ?? 0),
     totalBytes: Number(r.totalBytes ?? 0),
@@ -490,6 +500,16 @@ export async function deleteOwnedTransferFile(
   const remaining = Number(left?.n ?? 0);
   if (remaining === 0) await softDeleteOwnedTransfer(userId, transferId);
   return { ok: true, remaining };
+}
+
+/** Deletes a transfer only if this access key sent it. */
+export async function softDeleteDeviceTransfer(deviceId: string, transferId: string): Promise<boolean> {
+  const updated = await db
+    .update(transfers)
+    .set({ isDeleted: true })
+    .where(and(eq(transfers.id, transferId), eq(transfers.deviceId, deviceId), eq(transfers.isDeleted, false)))
+    .returning({ id: transfers.id });
+  return updated.length > 0;
 }
 
 // Owner-soft-deleted rows awaiting storage cleanup + hard-delete by the

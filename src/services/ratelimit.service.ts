@@ -616,6 +616,14 @@ export const rateLimiters = {
   // Vault writes — setup is one-shot; password/phrase rewrap is gated
   // to dampen brute-force-by-reupload of wrap blobs and accidental
   // double-submits from the UI.
+  // Access keys. Registering needs no account, so it is tight per source.
+  // Looking a pairing code up is how one would be guessed.
+  deviceRegister: { prefix: 'device-register', windowSeconds: HOUR_SECONDS, maxRequests: 10 },
+  devicePairingLookup: { prefix: 'device-pairing', windowSeconds: HOUR_SECONDS, maxRequests: 30 },
+  deviceWrite: { prefix: 'device-write', windowSeconds: HOUR_SECONDS, maxRequests: 30 },
+  // Everything one access key does, so a runaway script stops at its own key.
+  deviceRequests: { prefix: 'device-requests', windowSeconds: 60, maxRequests: 240 },
+
   // Portals. Writes are rare; the public read is hit once per visitor.
   portalWrite: { prefix: 'portal-write', windowSeconds: HOUR_SECONDS, maxRequests: 30 },
   portalInvite: { prefix: 'portal-invite', windowSeconds: DAY_SECONDS, maxRequests: 20 },

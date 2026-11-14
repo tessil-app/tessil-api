@@ -20,6 +20,8 @@ export interface TierCaps {
   depositRetentionDays: number | null;
   /** Portals an account may own. 0 on plans without portals. */
   maxPortals: number;
+  /** Access keys an account may have. 0 without an account. */
+  maxDevices: number;
 }
 
 /** Accounts a portal can be shared with, besides its owner. One, for now. */
@@ -34,6 +36,7 @@ const ANONYMOUS_CAPS: TierCaps = {
   storageBytes: null,
   depositRetentionDays: null,
   maxPortals: 0,
+  maxDevices: 0,
 };
 
 // Free reads from env so production deploys can override the defaults
@@ -49,6 +52,7 @@ function freeCaps(): TierCaps {
     storageBytes: null,
     depositRetentionDays: null,
     maxPortals: 0,
+    maxDevices: 1,
   };
 }
 
@@ -71,6 +75,7 @@ function proCaps(): TierCaps {
     storageBytes: env.PLAN_PRO_STORAGE_GB,
     depositRetentionDays: env.PLAN_PRO_RETENTION_DAYS,
     maxPortals: env.PLAN_PRO_MAX_PORTALS,
+    maxDevices: 3,
   };
 }
 
@@ -82,6 +87,7 @@ function maxCaps(): TierCaps {
     storageBytes: env.PLAN_MAX_STORAGE_GB,
     depositRetentionDays: env.PLAN_MAX_RETENTION_DAYS,
     maxPortals: env.PLAN_MAX_MAX_PORTALS,
+    maxDevices: 10,
   };
 }
 

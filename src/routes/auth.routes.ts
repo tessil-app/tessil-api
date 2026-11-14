@@ -1,4 +1,5 @@
 import { Elysia, redirect, t } from "elysia";
+import { revokeAllDevicesForUser } from "../services/device.service";
 import { env } from "../config/env";
 import { authPlugin } from "../auth/middleware";
 import { ipContextPlugin } from "../auth/ipContextPlugin";
@@ -470,6 +471,8 @@ export const authRoutes = new Elysia({ prefix: "/api/auth" })
         return { error: "Not authenticated" };
       }
       const count = await revokeAllSessionsForUser(me.id);
+      // Access keys outlive sessions, so "everywhere" has to include them.
+      const devicesRevoked = await revokeAllDevicesForUser(me.id);
       await logAuthEvent({
         eventType: "logout_all",
         userId: me.id,
@@ -478,7 +481,7 @@ export const authRoutes = new Elysia({ prefix: "/api/auth" })
         userAgent: request.headers.get("user-agent"),
       });
       cookie[SESSION_COOKIE_NAME].remove();
-      return { ok: true, sessionsRevoked: count };
+      return { ok: true, sessionsRevoked: count, devicesRevoked };
     },
   );
 

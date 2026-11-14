@@ -36,6 +36,10 @@ export const transfers = pgTable('transfers', {
   // See docs/adr/0005-encrypted-transfer-title-scope.md.
   encryptedTitle: varchar('encrypted_title', { length: 1024 }),
   encryptedTitleIv: varchar('encrypted_title_iv', { length: 32 }),
+  // The access key (device) that sent this transfer, if one did. Its
+  // `wrapped_key` is then wrapped under that device's own secret, not the
+  // vault. No foreign key: a device row may go while its transfers stay.
+  deviceId: varchar('device_id', { length: 21 }),
   // Set on a deposit: a transfer uploaded through a portal. A deposit has
   // no owner (user_id NULL) and no share link; only the portal's members
   // can list and download it. Deliberately not a foreign key: the value
@@ -432,6 +436,37 @@ export const portalInvites = pgTable('portal_invites', {
   emailIdx: index('portal_invites_email_idx').on(table.email),
 }));
 
+// An access key: a program outside the browser that may act for an
+// account. It signs in with a token of which only the hash is stored, and
+// things are encrypted to its public key. See
+// docs/adr/0015-access-keys-cli-and-mcp.md.
+//
+// A row starts pending, made by the program itself and belonging to
+// nobody. It becomes usable when a signed-in person approves it by its
+// pairing code, which sets `user_id`.
+export const devices = pgTable('devices', {
+  id: varchar('id', { length: 21 }).primaryKey(), // nanoid
+  userId: varchar('user_id', { length: 21 }).references(() => users.id, { onDelete: 'cascade' }),
+  name: varchar('name', { length: 80 }).notNull(),
+  // Raw uncompressed P-256 point, 65 bytes.
+  publicKey: bytea('public_key').notNull(),
+  tokenHash: varchar('token_hash', { length: 64 }).notNull(),
+  // SHA-256 of the pairing code. Cleared on approval.
+  pairingHash: varchar('pairing_hash', { length: 64 }),
+  pairingExpiresAt: timestamp('pairing_expires_at', { withTimezone: true }),
+  permissions: text('permissions').array().notNull().default(sql`'{}'::text[]`),
+  approvedAt: timestamp('approved_at', { withTimezone: true }),
+  expiresAt: timestamp('expires_at', { withTimezone: true }),
+  lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+  revokedAt: timestamp('revoked_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  tokenHashUnique: uniqueIndex('devices_token_hash_unique').on(table.tokenHash),
+  pairingHashIdx: index('devices_pairing_hash_idx').on(table.pairingHash),
+  userIdx: index('devices_user_id_idx').on(table.userId),
+}));
+
+export type Device = typeof devices.$inferSelect;
 export type Portal = typeof portals.$inferSelect;
 export type PortalMember = typeof portalMembers.$inferSelect;
 export type VaultItem = typeof vaultItems.$inferSelect;

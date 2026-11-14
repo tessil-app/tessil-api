@@ -10,6 +10,7 @@ import { billingRoutes } from "./routes/billing.routes";
 import { downloadRoutes } from "./routes/download.routes";
 import { meRoutes } from "./routes/me.routes";
 import { passkeyRoutes } from "./routes/passkey.routes";
+import { deviceRoutes } from "./routes/device.routes";
 import { portalRoutes } from "./routes/portal.routes";
 import { uploadRoutes } from "./routes/upload.routes";
 import { validateRoutes } from "./routes/validate.routes";
@@ -81,5 +82,6 @@ export function createApp() {
     .use(meRoutes)
     .use(vaultRoutes)
     .use(portalRoutes)
+    .use(deviceRoutes)
     .use(validateRoutes);
 }

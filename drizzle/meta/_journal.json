@@ -169,6 +169,13 @@
       "when": 1794685819880,
       "tag": "0023_portal_access_hash",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1794690456746,
+      "tag": "0024_access_keys",
+      "breakpoints": true
     }
   ]
 }
