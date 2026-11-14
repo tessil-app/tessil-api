@@ -1,0 +1,1 @@
+ALTER TABLE "portals" ADD COLUMN "access_hash" varchar(64);

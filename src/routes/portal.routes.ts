@@ -28,6 +28,7 @@ import { authPlugin } from "../auth/middleware";
 import { ipContextPlugin } from "../auth/ipContextPlugin";
 import { logAuthEvent } from "../auth/events";
 import { findUserById } from "../auth/users";
+import type { Portal } from "../db/schema";
 import { sendPortalNotice } from "../services/email.service";
 import {
   createDeposit,
@@ -45,18 +46,21 @@ import { isLikelyEmail, normaliseEmail } from "../auth/tokens";
 import { MAX_PORTAL_GUESTS, resolveCaps } from "../config/tiers";
 import { checkIpRateLimit, checkRateLimit, rateLimiters } from "../services/ratelimit.service";
 import {
+  ACCESS_TOKEN_BYTES,
   DEPOSIT_TOKEN_BYTES,
   PUBLIC_BUNDLE_MAX_BYTES,
   PUBLIC_BUNDLE_MIN_BYTES,
   SEALED_KEYS_MAX_BYTES,
   SEALED_KEYS_MIN_BYTES,
   createPortal,
+  accessTokenMatches,
   admitInvitee,
   createPortalInvite,
   deleteOwnedPortal,
   deletePortalInvite,
   depositTokenMatches,
   getPortalSharing,
+  hashAccessToken,
   isClosed,
   removeGuest,
   replaceOwnMemberKeys,
@@ -83,6 +87,33 @@ const b64 = (bytes: Uint8Array) => Buffer.from(bytes).toString("base64url");
 // base64url of the largest bundle, rounded up.
 const PUBLIC_BUNDLE_MAX_CHARS = Math.ceil((PUBLIC_BUNDLE_MAX_BYTES * 4) / 3) + 4;
 const NOT_FOUND = { error: "Portal not found" };
+
+// null or absent: no password. undefined: not a token.
+function parseAccessToken(input: string | null | undefined): string | null | undefined {
+  if (input === null || input === undefined) return null;
+  const token = decodeBounded(input, ACCESS_TOKEN_BYTES, ACCESS_TOKEN_BYTES);
+  return token ? hashAccessToken(token) : undefined;
+}
+
+// What a visitor's page needs. A portal stops accepting when its owner
+// switches it off, its date passes, or the owner is no longer on a plan
+// that includes portals. It stays visible so the depositor gets an
+// explanation, not a dead link.
+async function publicView(portal: Portal) {
+  const owner = await findUserById(portal.ownerId);
+  const ownerCaps = resolveCaps(owner && !owner.deletedAt ? owner : null);
+  return {
+    id: portal.id,
+    publicBundle: b64(portal.publicBundle),
+    keyVersion: portal.keyVersion,
+    accepting: !portal.isDisabled && !isClosed(portal) && ownerCaps.maxPortals > 0,
+    // So the page can say until when, or that the date has passed.
+    closesAt: portal.closesAt?.toISOString() ?? null,
+    // So the deposit page can say what fits before anything is uploaded.
+    maxFileSize: ownerCaps.maxFileSize,
+    maxTotalSize: ownerCaps.maxTransferSize,
+  };
+}
 
 // null or absent: no closing date. undefined: not a date.
 function parseClosesAt(input: string | null | undefined): Date | null | undefined {
@@ -143,12 +174,17 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
         set.status = 400;
         return { error: "closesAt must be a date and time, or null." };
       }
+      const accessHash = parseAccessToken(body.accessToken);
+      if (accessHash === undefined) {
+        set.status = 400;
+        return { error: "Malformed portal password token." };
+      }
 
       const result = await createPortal(
         me.id,
         caps.maxPortals,
         { id: body.id, publicBundle, sealedKeys, depositToken },
-        { closesAt, notifyOnDelivery: body.notifyOnDelivery },
+        { closesAt, notifyOnDelivery: body.notifyOnDelivery, accessHash },
       );
       if (!result.ok) {
         set.status = 409;
@@ -181,6 +217,7 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
         depositToken: t.String({ maxLength: 64 }),
         closesAt: t.Optional(t.Nullable(t.String({ maxLength: 40 }))),
         notifyOnDelivery: t.Optional(t.Boolean()),
+        accessToken: t.Optional(t.Nullable(t.String({ maxLength: 64 }))),
       }),
     },
   )
@@ -208,6 +245,7 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
         isDisabled: row.isDisabled,
         closesAt: row.closesAt?.toISOString() ?? null,
         notifyOnDelivery: row.notifyOnDelivery,
+        hasPassword: row.hasPassword,
         createdAt: row.createdAt.toISOString(),
         // Live deliveries. `unseen` arrived after this member last looked.
         deliveries: stats.get(row.id)?.deliveries ?? 0,
@@ -252,6 +290,14 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
         }
         changes.closesAt = closesAt;
       }
+      if (body.accessToken !== undefined) {
+        const accessHash = parseAccessToken(body.accessToken);
+        if (accessHash === undefined) {
+          set.status = 400;
+          return { error: "Malformed portal password token." };
+        }
+        changes.accessHash = accessHash;
+      }
       if (body.publicBundle !== undefined) {
         const bundle = decodeBounded(body.publicBundle, PUBLIC_BUNDLE_MIN_BYTES, PUBLIC_BUNDLE_MAX_BYTES);
         if (!bundle) {
@@ -279,6 +325,7 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
         publicBundle: t.Optional(t.String({ maxLength: PUBLIC_BUNDLE_MAX_CHARS })),
         closesAt: t.Optional(t.Nullable(t.String({ maxLength: 40 }))),
         notifyOnDelivery: t.Optional(t.Boolean()),
+        accessToken: t.Optional(t.Nullable(t.String({ maxLength: 64 }))),
       }),
     },
   )
@@ -336,26 +383,51 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
         return NOT_FOUND;
       }
 
-      // A portal stops accepting when its owner switches it off or is no
-      // longer on a plan that includes portals. It stays visible so the
-      // depositor gets an explanation, not a dead link.
-      const owner = await findUserById(portal.ownerId);
-      const ownerCaps = resolveCaps(owner && !owner.deletedAt ? owner : null);
-      const accepting = !portal.isDisabled && !isClosed(portal) && ownerCaps.maxPortals > 0;
-
-      return {
-        id: portal.id,
-        publicBundle: b64(portal.publicBundle),
-        keyVersion: portal.keyVersion,
-        accepting,
-        // So the page can say until when, or that the date has passed.
-        closesAt: portal.closesAt?.toISOString() ?? null,
-        // So the deposit page can say what fits before anything is uploaded.
-        maxFileSize: ownerCaps.maxFileSize,
-        maxTotalSize: ownerCaps.maxTransferSize,
-      };
+      // With a password set, nothing about the portal is handed out
+      // until the visitor shows they know it.
+      if (portal.accessHash !== null) return { id: portal.id, locked: true as const };
+      return publicView(portal);
     },
     { params: t.Object({ id: t.String() }) },
+  )
+
+  // The public read for a portal with a password. The token is derived in
+  // the visitor's browser from the password and the link key, so neither
+  // reaches the server.
+  .post(
+    "/:id/unlock",
+    async ({ params, body, ipContext, originRejected, set }) => {
+      if (originRejected) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
+      if (!NANOID_PATTERN.test(params.id)) {
+        set.status = 404;
+        return NOT_FOUND;
+      }
+      const perSource = await checkIpRateLimit(ipContext, rateLimiters.portalUnlockPerSource);
+      const perPortal = await checkRateLimit(params.id, rateLimiters.portalUnlockPerPortal);
+      if (!perSource.allowed || !perPortal.allowed) {
+        set.status = 429;
+        set.headers["Retry-After"] = String(Math.max(perSource.resetIn, perPortal.resetIn));
+        return { error: "Too many tries. Wait a while and try again.", code: "password_rate_limited" };
+      }
+      const portal = await getPortal(params.id);
+      if (!portal) {
+        set.status = 404;
+        return NOT_FOUND;
+      }
+      const token = decodeBounded(body.accessToken, ACCESS_TOKEN_BYTES, ACCESS_TOKEN_BYTES);
+      if (!accessTokenMatches(portal, token)) {
+        set.status = 403;
+        return { error: "That password is not right.", code: "password_wrong" };
+      }
+      return publicView(portal);
+    },
+    {
+      params: t.Object({ id: t.String() }),
+      body: t.Object({ accessToken: t.String({ maxLength: 64 }) }),
+    },
   )
 
   // Start a deposit. Returns a transfer ID; the depositor's browser then
@@ -394,6 +466,13 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
         set.status = 403;
         return { error: "This portal is not accepting files right now.", code: "portal_not_accepting" };
       }
+      const access = body.accessToken
+        ? decodeBounded(body.accessToken, ACCESS_TOKEN_BYTES, ACCESS_TOKEN_BYTES)
+        : null;
+      if (!accessTokenMatches(portal, access)) {
+        set.status = 403;
+        return { error: "This portal needs its password.", code: "password_wrong" };
+      }
       // Only starting is refused: a deposit begun in time may finish.
       if (isClosed(portal)) {
         set.status = 403;
@@ -426,6 +505,7 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
       params: t.Object({ id: t.String() }),
       body: t.Object({
         depositToken: t.String({ maxLength: 64 }),
+        accessToken: t.Optional(t.String({ maxLength: 64 })),
         // An optional note from the depositor, encrypted under the deposit's key.
         encryptedTitle: t.Optional(t.String({ maxLength: ENCRYPTED_TITLE_MAX_LENGTH })),
         encryptedTitleIv: t.Optional(t.String({ maxLength: ENCRYPTED_TITLE_IV_LENGTH })),

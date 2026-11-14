@@ -162,6 +162,13 @@
       "when": 1794664665250,
       "tag": "0022_portal_closing_and_notices",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1794685819880,
+      "tag": "0023_portal_access_hash",
+      "breakpoints": true
     }
   ]
 }

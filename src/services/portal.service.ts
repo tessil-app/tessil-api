@@ -19,9 +19,24 @@ export const SEALED_KEYS_MIN_BYTES = 1 + 65 + 32 + 16;
 export const SEALED_KEYS_MAX_BYTES = 1024;
 
 export const DEPOSIT_TOKEN_BYTES = 32;
+export const ACCESS_TOKEN_BYTES = 32;
 
 function hashDepositToken(token: Uint8Array): string {
   return createHash("sha256").update(token).digest("hex");
+}
+
+/** What to store for a portal password's token. */
+export function hashAccessToken(token: Uint8Array): string {
+  return hashDepositToken(token);
+}
+
+/** True when the portal has no password, or `token` is the one for it. */
+export function accessTokenMatches(portal: Pick<Portal, "accessHash">, token: Uint8Array | null): boolean {
+  if (portal.accessHash === null) return true;
+  if (!token) return false;
+  const expected = Buffer.from(portal.accessHash, "hex");
+  const actual = Buffer.from(hashAccessToken(token), "hex");
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
 
 /** True when `token` is the one this portal was created with. */
@@ -42,6 +57,7 @@ export interface PortalForMember {
   isDisabled: boolean;
   closesAt: Date | null;
   notifyOnDelivery: boolean;
+  hasPassword: boolean;
   createdAt: Date;
 }
 
@@ -49,6 +65,8 @@ export interface PortalForMember {
 export interface PortalSwitches {
   closesAt?: Date | null;
   notifyOnDelivery?: boolean;
+  /** Hash of the password token. Null: no password. */
+  accessHash?: string | null;
 }
 
 /** True once the portal's closing moment has passed. */
@@ -89,6 +107,7 @@ export async function createPortal(
         depositTokenHash: hashDepositToken(blobs.depositToken),
         ...(switches.closesAt ? { closesAt: switches.closesAt } : {}),
         ...(switches.notifyOnDelivery ? { notifyOnDelivery: true } : {}),
+        ...(switches.accessHash ? { accessHash: switches.accessHash } : {}),
       })
       .onConflictDoNothing({ target: portals.id })
       .returning();
@@ -116,6 +135,7 @@ export async function listPortalsForMember(userId: string): Promise<PortalForMem
       isDisabled: portals.isDisabled,
       closesAt: portals.closesAt,
       notifyOnDelivery: portals.notifyOnDelivery,
+      accessHash: portals.accessHash,
       createdAt: portals.createdAt,
       ownerId: portals.ownerId,
       ownerEmail: users.email,
@@ -127,8 +147,9 @@ export async function listPortalsForMember(userId: string): Promise<PortalForMem
     .where(eq(portalMembers.userId, userId));
   return rows
     .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
-    .map(({ ownerId, ownerEmail, ownerPublicKey, ...row }) => ({
+    .map(({ ownerId, ownerEmail, ownerPublicKey, accessHash, ...row }) => ({
       ...row,
+      hasPassword: accessHash !== null,
       owner: { userId: ownerId, email: ownerEmail, publicKey: ownerPublicKey },
     }));
 }

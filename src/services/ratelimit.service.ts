@@ -624,6 +624,9 @@ export const rateLimiters = {
   // source and per portal instead of by anyone's upload allowance.
   portalDepositPerSource: { prefix: 'portal-deposit-source', windowSeconds: HOUR_SECONDS, maxRequests: 10 },
   portalDepositPerPortal: { prefix: 'portal-deposit-portal', windowSeconds: HOUR_SECONDS, maxRequests: 60 },
+  // Password tries on a portal, right or wrong.
+  portalUnlockPerSource: { prefix: 'portal-unlock-source', windowSeconds: 15 * 60, maxRequests: 20 },
+  portalUnlockPerPortal: { prefix: 'portal-unlock-portal', windowSeconds: HOUR_SECONDS, maxRequests: 300 },
   portalMemberRead: { prefix: 'portal-member-read', windowSeconds: 60, maxRequests: 120 },
 
   // The keypair is created right after setup and retried at each unlock

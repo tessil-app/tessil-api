@@ -368,6 +368,10 @@ export const portals = pgTable('portals', {
   // Email the members when a deposit arrives, at most once an hour.
   notifyOnDelivery: boolean('notify_on_delivery').default(false).notNull(),
   lastNotifiedAt: timestamp('last_notified_at', { withTimezone: true }),
+  // SHA-256 of a token the visitor's browser derives from the portal's
+  // password and its link key. Set: the bundle and deposits need the token.
+  // Without the link key the password cannot be guessed from this.
+  accessHash: varchar('access_hash', { length: 64 }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
 }, (table) => ({
   ownerIdx: index('portals_owner_id_idx').on(table.ownerId),
