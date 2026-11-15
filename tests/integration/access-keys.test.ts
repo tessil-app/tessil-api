@@ -8,7 +8,7 @@ import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { createApp } from "../../src/app";
 import { db } from "../../src/db";
-import { devices, transfers, users } from "../../src/db/schema";
+import { devicePortalKeys, devices, portalMembers, transfers, users } from "../../src/db/schema";
 import { purgeDeadDevices } from "../../src/services/device.service";
 import { resetRateLimits } from "../../src/services/ratelimit.service";
 import { authedRequest, createAuthedUser } from "../helpers/auth";
@@ -114,6 +114,7 @@ describe("pairing", () => {
     expect(self.device.name).toBe("Laptop");
     expect(self.device.permissions).toEqual(["transfers:send", "transfers:read"]);
     expect(self.account.email).toBe(owner.user.email);
+    expect((self.account as { id?: string }).id).toBe(owner.user.id);
     const days = (new Date(self.device.expiresAt).getTime() - Date.now()) / 86_400_000;
     expect(Math.round(days)).toBe(90);
   });
@@ -486,5 +487,129 @@ describe("cleaning up", () => {
     expect(await purgeDeadDevices()).toBe(2);
     const left = (await db.select({ id: devices.id }).from(devices)).map((d) => d.id).sort();
     expect(left).toEqual([waiting.id, live.device.id].sort());
+  });
+});
+
+describe("portals handed to a key", () => {
+  const SEALED_DEPOSIT_KEY = b64(new Uint8Array(114).fill(5));
+  const DEPOSIT_TOKEN = b64(new Uint8Array(32).fill(6));
+  const GRANT = b64(new Uint8Array(200).fill(9));
+
+  /** A paid account with a portal that holds one delivery, and a key that may read portals. */
+  async function setup(permissions = ["portals:read"]) {
+    const { owner, device } = await approved(permissions, "pro");
+    await db.update(users).set({ publicKey: new Uint8Array(65).fill(4) }).where(eq(users.id, owner.user.id));
+    const portalId = nanoid();
+    const made = await asPerson(owner.cookie, "POST", "/api/portals", {
+      id: portalId,
+      publicBundle: b64(new Uint8Array(140).fill(3)),
+      sealedKeys: b64(new Uint8Array(200).fill(4)),
+      depositToken: DEPOSIT_TOKEN,
+    });
+    expect(made.status).toBe(201);
+    const started = await asDevice(null, "POST", `/api/portals/${portalId}/deposits`, { depositToken: DEPOSIT_TOKEN }, { Origin: APP_URL });
+    const { transferId } = (await started.json()) as { transferId: string };
+    const init = await asDevice(null, "POST", "/api/upload/init-multipart", { transferId, size: 1024, ...FILE_FIELDS }, { Origin: APP_URL });
+    const { fileId } = (await init.json()) as { fileId: string };
+    await asDevice(null, "POST", "/api/upload/complete", { transferId, sealedKey: SEALED_DEPOSIT_KEY }, { Origin: APP_URL });
+    return { owner, device, portalId, transferId, fileId };
+  }
+
+  const grant = (cookie: string, deviceId: string, portalId: string, keyVersion = 1) =>
+    asPerson(cookie, "PUT", `/api/devices/${deviceId}/portals/${portalId}`, { sealedKeys: GRANT, keyVersion });
+
+  it("sees nothing until a portal is handed over, then that portal and its deliveries", async () => {
+    const { owner, device, portalId, transferId, fileId } = await setup();
+    const empty = (await (await asDevice(device.token, "GET", "/api/devices/self/portals")).json()) as { portals: unknown[] };
+    expect(empty.portals).toEqual([]);
+    expect((await asDevice(device.token, "GET", `/api/devices/self/portals/${portalId}/deposits`)).status).toBe(404);
+
+    expect((await grant(owner.cookie, device.id, portalId)).status).toBe(200);
+    const listed = (await (await asPerson(owner.cookie, "GET", `/api/devices/${device.id}/portals`)).json()) as {
+      portals: { portalId: string }[];
+    };
+    expect(listed.portals.map((p) => p.portalId)).toEqual([portalId]);
+
+    const mine = (await (await asDevice(device.token, "GET", "/api/devices/self/portals")).json()) as {
+      portals: { id: string; sealedKeys: string; deliveries: number; role: string }[];
+    };
+    expect(mine.portals).toHaveLength(1);
+    // The key gets what was handed to it, not the owner's own copy.
+    expect(mine.portals[0]).toMatchObject({ id: portalId, sealedKeys: GRANT, deliveries: 1, role: "owner" });
+
+    const deposits = (await (await asDevice(device.token, "GET", `/api/devices/self/portals/${portalId}/deposits`)).json()) as {
+      deposits: { id: string; sealedKey: string; files: { id: string }[] }[];
+    };
+    expect(deposits.deposits.map((d) => d.id)).toEqual([transferId]);
+    expect(deposits.deposits[0].sealedKey).toBe(SEALED_DEPOSIT_KEY);
+
+    const url = await asDevice(device.token, "GET", `/api/devices/self/portals/${portalId}/files/${fileId}/url`);
+    expect(url.status).toBe(200);
+    expect(((await url.json()) as { downloadUrl: string }).downloadUrl).toContain("http");
+  });
+
+  it("needs the permission, however many portals were handed over", async () => {
+    const { owner, device, portalId, fileId } = await setup(["transfers:send"]);
+    await grant(owner.cookie, device.id, portalId);
+    for (const path of ["", `/${portalId}/deposits`, `/${portalId}/files/${fileId}/url`]) {
+      const res = await asDevice(device.token, "GET", `/api/devices/self/portals${path}`);
+      expect(res.status).toBe(403);
+    }
+  });
+
+  it("opens only the portals it was handed, and no other of the account's", async () => {
+    const { owner, device, portalId } = await setup();
+    await grant(owner.cookie, device.id, portalId);
+    const otherId = nanoid();
+    await asPerson(owner.cookie, "POST", "/api/portals", {
+      id: otherId,
+      publicBundle: b64(new Uint8Array(140).fill(3)),
+      sealedKeys: b64(new Uint8Array(200).fill(4)),
+      depositToken: DEPOSIT_TOKEN,
+    });
+    expect((await asDevice(device.token, "GET", `/api/devices/self/portals/${otherId}/deposits`)).status).toBe(404);
+    // A file of the handed portal cannot be asked for through the other one.
+    const mine = (await (await asDevice(device.token, "GET", "/api/devices/self/portals")).json()) as { portals: { id: string }[] };
+    expect(mine.portals.map((p) => p.id)).toEqual([portalId]);
+  });
+
+  it("can only be handed a portal by a member of it, for one of their own keys", async () => {
+    const { owner, device, portalId } = await setup();
+    const stranger = await approved(["portals:read"], "pro");
+    // A stranger cannot hand the owner's portal to their own key,
+    expect((await grant(stranger.owner.cookie, stranger.device.id, portalId)).status).toBe(404);
+    // nor anything to the owner's key.
+    expect((await grant(stranger.owner.cookie, device.id, portalId)).status).toBe(404);
+    // A key cannot grant itself a portal.
+    const self = await asDevice(device.token, "PUT", `/api/devices/${device.id}/portals/${portalId}`, { sealedKeys: GRANT, keyVersion: 1 });
+    expect(self.status).toBe(401);
+    expect(await db.select().from(devicePortalKeys)).toHaveLength(0);
+
+    expect((await grant(owner.cookie, device.id, portalId, 2)).status).toBe(409);
+    expect((await asPerson(owner.cookie, "PUT", `/api/devices/${device.id}/portals/${portalId}`, { sealedKeys: "AAAA", keyVersion: 1 })).status).toBe(400);
+  });
+
+  it("loses a portal when it is taken back, when the account leaves it, and when the key is revoked", async () => {
+    const { owner, device, portalId } = await setup();
+    await grant(owner.cookie, device.id, portalId);
+    const open = () => asDevice(device.token, "GET", `/api/devices/self/portals/${portalId}/deposits`);
+    expect((await open()).status).toBe(200);
+
+    expect((await asPerson(owner.cookie, "DELETE", `/api/devices/${device.id}/portals/${portalId}`)).status).toBe(204);
+    expect((await open()).status).toBe(404);
+
+    await grant(owner.cookie, device.id, portalId);
+    expect((await open()).status).toBe(200);
+    // The account is no longer a member: its keys lose the portal with it.
+    await db.delete(portalMembers).where(eq(portalMembers.userId, owner.user.id));
+    expect((await open()).status).toBe(404);
+    expect(((await (await asDevice(device.token, "GET", "/api/devices/self/portals")).json()) as { portals: unknown[] }).portals).toEqual([]);
+  });
+
+  it("forgets its grants when the portal is deleted", async () => {
+    const { owner, device, portalId } = await setup();
+    await grant(owner.cookie, device.id, portalId);
+    expect((await asPerson(owner.cookie, "DELETE", `/api/portals/${portalId}`)).status).toBe(204);
+    expect(await db.select().from(devicePortalKeys)).toHaveLength(0);
   });
 });

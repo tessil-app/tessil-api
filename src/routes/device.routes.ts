@@ -15,21 +15,29 @@ import {
   approveDevice,
   canonicalisePairingCode,
   cleanPermissions,
+  deviceMayOpenPortal,
   findPendingByCode,
+  grantPortalToDevice,
   isActive,
   listDevices,
+  listGrantsOfOwnedDevice,
+  listPortalsForDevice,
   registerPendingDevice,
   revokeOwnedDevice,
+  revokePortalFromDevice,
   updateOwnedDevice,
   type DevicePermission,
 } from "../services/device.service";
-import { listTransfersForUser, softDeleteDeviceTransfer } from "../services/file.service";
+import { getDepositFile, listDeposits, listTransfersForUser, softDeleteDeviceTransfer } from "../services/file.service";
+import { SEALED_KEYS_MAX_BYTES, SEALED_KEYS_MIN_BYTES, portalStatsForMember } from "../services/portal.service";
+import { getPresignedDownloadUrl } from "../services/r2.service";
 import { checkIpRateLimit, checkRateLimit, rateLimiters } from "../services/ratelimit.service";
 
 const NANOID_PATTERN = /^[A-Za-z0-9_-]{21}$/;
 const TOKEN_HASH_PATTERN = /^[0-9a-f]{64}$/;
 const NOT_FOUND = { error: "Access key not found" };
 const PAGE_SIZE = 50;
+const DEPOSIT_PAGE_SIZE = 30;
 
 const b64 = (bytes: Uint8Array) => Buffer.from(bytes).toString("base64url");
 
@@ -132,6 +140,8 @@ export const deviceRoutes = new Elysia({ prefix: "/api/devices" })
       status: "active" as const,
       device: view(device),
       account: {
+        // Portal grants are bound to this ID and signed with the key below.
+        id: user.id,
         email: user.email,
         tier: user.tier,
         // The key the account's portal grants are signed with; pinned by the program.
@@ -215,7 +225,209 @@ export const deviceRoutes = new Elysia({ prefix: "/api/devices" })
     { params: t.Object({ id: t.String() }) },
   )
 
+  // ─── portals, for a key that was handed some ──────────────────────────────
+
+  // The portals this key can open, each with its keys as they were handed
+  // over. The program opens them only if they are signed by the account's
+  // own key, which it pinned when it was approved.
+  .get("/self/portals", async ({ request, set }) => {
+    const resolved = await resolveDevice(request);
+    if (!resolved.device) {
+      const { status, body } = denialResponse(resolved.denied ?? "invalid");
+      set.status = status;
+      return body;
+    }
+    const { device, user } = resolved.device;
+    if (!device.permissions.includes("portals:read")) {
+      set.status = 403;
+      return { error: "This access key is not allowed to do that.", code: "device_forbidden", permission: "portals:read" };
+    }
+    const [granted, stats] = await Promise.all([listPortalsForDevice(device), portalStatsForMember(user.id)]);
+    return {
+      portals: granted.map((p) => ({
+        id: p.id,
+        role: p.role,
+        publicBundle: b64(p.publicBundle),
+        sealedKeys: b64(p.sealedKeys),
+        keyVersion: p.keyVersion,
+        isDisabled: p.isDisabled,
+        closesAt: p.closesAt?.toISOString() ?? null,
+        createdAt: p.createdAt.toISOString(),
+        deliveries: stats.get(p.id)?.deliveries ?? 0,
+        lastDeliveryAt: stats.get(p.id)?.lastDeliveryAt?.toISOString() ?? null,
+      })),
+    };
+  })
+
+  .get(
+    "/self/portals/:id/deposits",
+    async ({ request, params, query, set }) => {
+      const resolved = await resolveDevice(request);
+      if (!resolved.device) {
+        const { status, body } = denialResponse(resolved.denied ?? "invalid");
+        set.status = status;
+        return body;
+      }
+      const { device } = resolved.device;
+      if (!device.permissions.includes("portals:read")) {
+        set.status = 403;
+        return { error: "This access key is not allowed to do that.", code: "device_forbidden", permission: "portals:read" };
+      }
+      // Not handed to this key and no such portal look the same.
+      if (!NANOID_PATTERN.test(params.id) || !(await deviceMayOpenPortal(device, params.id))) {
+        set.status = 404;
+        return { error: "Portal not found" };
+      }
+      const cursor = query.cursor ? new Date(query.cursor) : null;
+      if (cursor && Number.isNaN(cursor.getTime())) {
+        set.status = 400;
+        return { error: "Invalid cursor." };
+      }
+      const deposits = await listDeposits(params.id, cursor, DEPOSIT_PAGE_SIZE);
+      return {
+        deposits: deposits.map((d) => ({
+          id: d.id,
+          createdAt: d.createdAt.toISOString(),
+          expiresAt: d.expiresAt.toISOString(),
+          sealedKey: b64(d.sealedKey),
+          encryptedTitle: d.encryptedTitle,
+          encryptedTitleIv: d.encryptedTitleIv,
+          files: d.files,
+        })),
+        nextCursor:
+          deposits.length === DEPOSIT_PAGE_SIZE ? deposits[deposits.length - 1].createdAt.toISOString() : null,
+      };
+    },
+    {
+      params: t.Object({ id: t.String() }),
+      query: t.Object({ cursor: t.Optional(t.String({ maxLength: 40 })) }),
+    },
+  )
+
+  .get(
+    "/self/portals/:id/files/:fileId/url",
+    async ({ request, params, set }) => {
+      const resolved = await resolveDevice(request);
+      if (!resolved.device) {
+        const { status, body } = denialResponse(resolved.denied ?? "invalid");
+        set.status = status;
+        return body;
+      }
+      const { device } = resolved.device;
+      if (!device.permissions.includes("portals:read")) {
+        set.status = 403;
+        return { error: "This access key is not allowed to do that.", code: "device_forbidden", permission: "portals:read" };
+      }
+      if (
+        !NANOID_PATTERN.test(params.id) ||
+        !NANOID_PATTERN.test(params.fileId) ||
+        !(await deviceMayOpenPortal(device, params.id))
+      ) {
+        set.status = 404;
+        return { error: "Portal not found" };
+      }
+      const file = await getDepositFile(params.id, params.fileId);
+      if (!file) {
+        set.status = 404;
+        return { error: "File not found" };
+      }
+      const presigned = await getPresignedDownloadUrl(file.r2Key, file.expiresAt);
+      return { downloadUrl: presigned.url, expiresAt: presigned.expiresAt.toISOString(), size: file.size };
+    },
+    { params: t.Object({ id: t.String(), fileId: t.String() }) },
+  )
+
   // ─── the person's side: session only ──────────────────────────────────────
+
+  // Which portals a key has been handed.
+  .get(
+    "/:id/portals",
+    async ({ me, params, set }) => {
+      if (!me) {
+        set.status = 401;
+        return { error: "Not authenticated" };
+      }
+      const grants = NANOID_PATTERN.test(params.id) ? await listGrantsOfOwnedDevice(me.id, params.id) : null;
+      if (!grants) {
+        set.status = 404;
+        return NOT_FOUND;
+      }
+      return { portals: grants };
+    },
+    { params: t.Object({ id: t.String() }) },
+  )
+
+  // Hand a portal to a key. The body is the portal's keys, sealed in the
+  // browser to the key's public key and signed by the account's own.
+  .put(
+    "/:id/portals/:portalId",
+    async ({ me, params, body, originRejected, set }) => {
+      if (originRejected) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
+      if (!me) {
+        set.status = 401;
+        return { error: "Not authenticated" };
+      }
+      const limit = await checkRateLimit(me.id, rateLimiters.deviceWrite);
+      if (!limit.allowed) {
+        set.status = 429;
+        set.headers["Retry-After"] = String(limit.resetIn);
+        return { error: "Rate limit exceeded. Try again later." };
+      }
+      const sealed = /^[A-Za-z0-9_-]+$/.test(body.sealedKeys) ? new Uint8Array(Buffer.from(body.sealedKeys, "base64url")) : null;
+      if (
+        !NANOID_PATTERN.test(params.id) ||
+        !NANOID_PATTERN.test(params.portalId) ||
+        !sealed ||
+        sealed.length < SEALED_KEYS_MIN_BYTES ||
+        sealed.length > SEALED_KEYS_MAX_BYTES
+      ) {
+        set.status = 400;
+        return { error: "Malformed request." };
+      }
+      const result = await grantPortalToDevice(me.id, params.id, params.portalId, body.keyVersion, sealed);
+      if (result === "not_found") {
+        set.status = 404;
+        return NOT_FOUND;
+      }
+      if (result === "stale_version") {
+        set.status = 409;
+        return { error: "This portal's keys have changed. Reload and try again.", code: "portal_key_version_stale" };
+      }
+      return { ok: true as const };
+    },
+    {
+      params: t.Object({ id: t.String(), portalId: t.String() }),
+      body: t.Object({ sealedKeys: t.String({ maxLength: 2048 }), keyVersion: t.Number() }),
+    },
+  )
+
+  .delete(
+    "/:id/portals/:portalId",
+    async ({ me, params, originRejected, set }) => {
+      if (originRejected) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
+      if (!me) {
+        set.status = 401;
+        return { error: "Not authenticated" };
+      }
+      if (
+        !NANOID_PATTERN.test(params.id) ||
+        !NANOID_PATTERN.test(params.portalId) ||
+        !(await revokePortalFromDevice(me.id, params.id, params.portalId))
+      ) {
+        set.status = 404;
+        return NOT_FOUND;
+      }
+      set.status = 204;
+      return null;
+    },
+    { params: t.Object({ id: t.String(), portalId: t.String() }) },
+  )
 
   .get("/", async ({ me, set }) => {
     if (!me) {
