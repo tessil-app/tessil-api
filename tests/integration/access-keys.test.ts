@@ -114,6 +114,7 @@ describe("pairing", () => {
     expect(self.device.name).toBe("Laptop");
     expect(self.device.permissions).toEqual(["transfers:send", "transfers:read"]);
     expect(self.account.email).toBe(owner.user.email);
+    expect((self.account as { id?: string }).id).toBe(owner.user.id);
     const days = (new Date(self.device.expiresAt).getTime() - Date.now()) / 86_400_000;
     expect(Math.round(days)).toBe(90);
   });

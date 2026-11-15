@@ -140,6 +140,8 @@ export const deviceRoutes = new Elysia({ prefix: "/api/devices" })
       status: "active" as const,
       device: view(device),
       account: {
+        // Portal grants are bound to this ID and signed with the key below.
+        id: user.id,
         email: user.email,
         tier: user.tier,
         // The key the account's portal grants are signed with; pinned by the program.
