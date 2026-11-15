@@ -466,6 +466,25 @@ export const devices = pgTable('devices', {
   userIdx: index('devices_user_id_idx').on(table.userId),
 }));
 
+// A portal's keys, handed to an access key by a member of the portal. The
+// member's browser seals them to the device's public key and signs them
+// with the member's own, so the server can neither read nor forge one.
+// A row here is the whole of what "this key may open that portal" means.
+export const devicePortalKeys = pgTable('device_portal_keys', {
+  deviceId: varchar('device_id', { length: 21 })
+    .notNull()
+    .references(() => devices.id, { onDelete: 'cascade' }),
+  portalId: varchar('portal_id', { length: 21 })
+    .notNull()
+    .references(() => portals.id, { onDelete: 'cascade' }),
+  keyVersion: integer('key_version').notNull(),
+  sealedKeys: bytea('sealed_keys').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  pk: uniqueIndex('device_portal_keys_device_portal_unique').on(table.deviceId, table.portalId),
+  portalIdx: index('device_portal_keys_portal_id_idx').on(table.portalId),
+}));
+
 export type Device = typeof devices.$inferSelect;
 export type Portal = typeof portals.$inferSelect;
 export type PortalMember = typeof portalMembers.$inferSelect;

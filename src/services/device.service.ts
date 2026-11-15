@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import { and, desc, eq, gt, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { db } from "../db";
-import { devices, sessions, type Device } from "../db/schema";
+import { devicePortalKeys, devices, portalMembers, portals, sessions, type Device } from "../db/schema";
 
 export const DEVICE_PERMISSIONS = [
   "transfers:send",
@@ -286,4 +286,121 @@ export async function purgeDeadDevices(): Promise<number> {
     )
     .returning({ id: devices.id });
   return removed.length;
+}
+
+// ─── portals a key may open ─────────────────────────────────────────────────
+
+/** Which portals a key of this account has been handed. Null when the key is not theirs. */
+export async function listGrantsOfOwnedDevice(
+  userId: string,
+  deviceId: string,
+): Promise<{ portalId: string; keyVersion: number }[] | null> {
+  const [device] = await db
+    .select({ id: devices.id })
+    .from(devices)
+    .where(and(eq(devices.id, deviceId), eq(devices.userId, userId), isNull(devices.revokedAt)))
+    .limit(1);
+  if (!device) return null;
+  return db
+    .select({ portalId: devicePortalKeys.portalId, keyVersion: devicePortalKeys.keyVersion })
+    .from(devicePortalKeys)
+    .where(eq(devicePortalKeys.deviceId, deviceId));
+}
+
+/**
+ * Stores a portal's keys for one of the account's own keys. Refused unless
+ * the key is theirs and usable and they are a member of the portal: one
+ * can only hand on what one holds. The version must be the portal's
+ * current one, so a grant cannot be made for keys that were rotated away.
+ */
+export async function grantPortalToDevice(
+  userId: string,
+  deviceId: string,
+  portalId: string,
+  keyVersion: number,
+  sealedKeys: Uint8Array,
+): Promise<"ok" | "not_found" | "stale_version"> {
+  const [row] = await db
+    .select({ portalVersion: portals.keyVersion })
+    .from(devices)
+    .innerJoin(portalMembers, and(eq(portalMembers.userId, devices.userId), eq(portalMembers.portalId, portalId)))
+    .innerJoin(portals, eq(portals.id, portalMembers.portalId))
+    .where(and(eq(devices.id, deviceId), eq(devices.userId, userId), isNull(devices.revokedAt)))
+    .limit(1);
+  if (!row) return "not_found";
+  if (row.portalVersion !== keyVersion) return "stale_version";
+  await db
+    .insert(devicePortalKeys)
+    .values({ deviceId, portalId, keyVersion, sealedKeys })
+    .onConflictDoUpdate({
+      target: [devicePortalKeys.deviceId, devicePortalKeys.portalId],
+      set: { keyVersion, sealedKeys, createdAt: new Date() },
+    });
+  return "ok";
+}
+
+export async function revokePortalFromDevice(userId: string, deviceId: string, portalId: string): Promise<boolean> {
+  const removed = await db
+    .delete(devicePortalKeys)
+    .where(
+      and(
+        eq(devicePortalKeys.deviceId, deviceId),
+        eq(devicePortalKeys.portalId, portalId),
+        sql`exists (select 1 from ${devices} where ${devices.id} = ${deviceId} and ${devices.userId} = ${userId})`,
+      ),
+    )
+    .returning({ portalId: devicePortalKeys.portalId });
+  return removed.length > 0;
+}
+
+export interface GrantedPortal {
+  id: string;
+  role: string;
+  publicBundle: Uint8Array;
+  /** The portal's keys as handed to this device. */
+  sealedKeys: Uint8Array;
+  keyVersion: number;
+  isDisabled: boolean;
+  closesAt: Date | null;
+  createdAt: Date;
+}
+
+/**
+ * The portals a key can open right now: handed to it, and its account is
+ * still a member. Leaving a portal, or being removed from it, takes it
+ * away from the account's keys without anyone having to remember them.
+ */
+export async function listPortalsForDevice(device: Device): Promise<GrantedPortal[]> {
+  if (!device.userId) return [];
+  return db
+    .select({
+      id: portals.id,
+      role: portalMembers.role,
+      publicBundle: portals.publicBundle,
+      sealedKeys: devicePortalKeys.sealedKeys,
+      keyVersion: devicePortalKeys.keyVersion,
+      isDisabled: portals.isDisabled,
+      closesAt: portals.closesAt,
+      createdAt: portals.createdAt,
+    })
+    .from(devicePortalKeys)
+    .innerJoin(portals, eq(portals.id, devicePortalKeys.portalId))
+    .innerJoin(portalMembers, and(eq(portalMembers.portalId, portals.id), eq(portalMembers.userId, device.userId)))
+    .where(eq(devicePortalKeys.deviceId, device.id))
+    .orderBy(desc(portals.createdAt));
+}
+
+/** True when this key may open this portal right now. */
+export async function deviceMayOpenPortal(device: Device, portalId: string): Promise<boolean> {
+  if (!device.userId) return false;
+  const [row] = await db
+    .select({ portalId: devicePortalKeys.portalId })
+    .from(devicePortalKeys)
+    .innerJoin(
+      portalMembers,
+      and(eq(portalMembers.portalId, devicePortalKeys.portalId), eq(portalMembers.userId, device.userId)),
+    )
+    .where(and(eq(devicePortalKeys.deviceId, device.id), eq(devicePortalKeys.portalId, portalId)))
+    .limit(1);
+  return row !== undefined;
 }
