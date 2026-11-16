@@ -20,6 +20,8 @@ export interface TierCaps {
   depositRetentionDays: number | null;
   /** Portals an account may own. 0 on plans without portals. */
   maxPortals: number;
+  /** Forms an account may own, counted apart from portals. */
+  maxForms: number;
   /** Access keys an account may have. 0 without an account. */
   maxDevices: number;
 }
@@ -36,6 +38,7 @@ const ANONYMOUS_CAPS: TierCaps = {
   storageBytes: null,
   depositRetentionDays: null,
   maxPortals: 0,
+  maxForms: 0,
   maxDevices: 0,
 };
 
@@ -52,6 +55,7 @@ function freeCaps(): TierCaps {
     storageBytes: null,
     depositRetentionDays: null,
     maxPortals: 0,
+    maxForms: 0,
     maxDevices: 1,
   };
 }
@@ -75,6 +79,7 @@ function proCaps(): TierCaps {
     storageBytes: env.PLAN_PRO_STORAGE_GB,
     depositRetentionDays: env.PLAN_PRO_RETENTION_DAYS,
     maxPortals: env.PLAN_PRO_MAX_PORTALS,
+    maxForms: env.PLAN_PRO_MAX_FORMS,
     maxDevices: 3,
   };
 }
@@ -87,8 +92,16 @@ function maxCaps(): TierCaps {
     storageBytes: env.PLAN_MAX_STORAGE_GB,
     depositRetentionDays: env.PLAN_MAX_RETENTION_DAYS,
     maxPortals: env.PLAN_MAX_MAX_PORTALS,
+    maxForms: env.PLAN_MAX_MAX_FORMS,
     maxDevices: 10,
   };
+}
+
+export type PortalKind = "portal" | "form";
+
+/** How many of this kind the plan allows; 0 when it has none. */
+export function limitFor(caps: TierCaps, kind: string): number {
+  return kind === "form" ? caps.maxForms : caps.maxPortals;
 }
 
 export type PaidTier = "pro" | "max";

@@ -387,7 +387,7 @@ export type PortalNotice =
   /** To the guest: the owner handed over access. */
   | { kind: "access_given"; to: string; ownerEmail: string }
   /** To a member: files arrived in a portal that has arrival emails on. */
-  | { kind: "delivery"; to: string; portalId: string };
+  | { kind: "delivery"; to: string; portalId: string; form?: boolean };
 
 interface NoticeContent {
   subject: string;
@@ -433,6 +433,19 @@ export function buildPortalNotice(notice: PortalNotice): NoticeContent {
         footnote: `If you don't know ${notice.ownerEmail}, you can decline it there.`,
       };
     case "delivery":
+      if (notice.form) {
+        return {
+          subject: "A new response to one of your Tessil forms",
+          heading: "A new response arrived",
+          paragraphs: [
+            "Someone filled in one of your forms. Open it to read their answers.",
+            "We can't tell you which form by name or what was answered: both are encrypted and only you can read them.",
+          ],
+          button: { label: "Open the form", url: `${env.APP_URL}/dashboard/forms/${notice.portalId}` },
+          footnote:
+            "At most one of these per form per hour. The form's owner can switch them off in its settings.",
+        };
+      }
       return {
         subject: "New files in one of your Tessil portals",
         heading: "New files arrived",

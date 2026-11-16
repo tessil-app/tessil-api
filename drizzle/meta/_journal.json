@@ -183,6 +183,13 @@
       "when": 1794759227993,
       "tag": "0025_access_key_portals",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1794841545824,
+      "tag": "0026_portal_kind",
+      "breakpoints": true
     }
   ]
 }

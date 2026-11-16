@@ -14,7 +14,7 @@ import {
   releaseAuthedOrIpVolumeLimit,
   releaseVolumeLimit,
 } from '../services/ratelimit.service';
-import { resolveCaps } from '../config/tiers';
+import { limitFor, resolveCaps } from '../config/tiers';
 import { findUserById } from '../auth/users';
 import { claimDeliveryNotice, getPortal } from '../services/portal.service';
 import { deviceAccess } from '../auth/deviceAuth';
@@ -50,7 +50,7 @@ async function depositTarget(portalId: string): Promise<{ owner: User } | null> 
   const portal = await getPortal(portalId);
   if (!portal || portal.isDisabled) return null;
   const owner = await findUserById(portal.ownerId);
-  if (!owner || owner.deletedAt || resolveCaps(owner).maxPortals === 0) return null;
+  if (!owner || owner.deletedAt || limitFor(resolveCaps(owner), portal.kind) === 0) return null;
   return { owner };
 }
 
@@ -59,7 +59,9 @@ async function depositTarget(portalId: string): Promise<{ owner: User } | null> 
 async function notifyOfDelivery(portalId: string): Promise<void> {
   try {
     const recipients = await claimDeliveryNotice(portalId);
-    await Promise.all(recipients.map((to) => sendPortalNotice({ kind: 'delivery', to, portalId })));
+    if (recipients.length === 0) return;
+    const form = (await getPortal(portalId))?.kind === 'form';
+    await Promise.all(recipients.map((to) => sendPortalNotice({ kind: 'delivery', to, portalId, form })));
   } catch (err) {
     console.error('[portal] delivery notice failed', err instanceof Error ? err.message : err);
   }

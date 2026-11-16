@@ -28,7 +28,7 @@ import {
   updateOwnedDevice,
   type DevicePermission,
 } from "../services/device.service";
-import { getDepositFile, listDeposits, listTransfersForUser, softDeleteDeviceTransfer } from "../services/file.service";
+import { answersUrlOf, getDepositFile, listDeposits, listTransfersForUser, softDeleteDeviceTransfer } from "../services/file.service";
 import { SEALED_KEYS_MAX_BYTES, SEALED_KEYS_MIN_BYTES, portalStatsForMember } from "../services/portal.service";
 import { getPresignedDownloadUrl } from "../services/r2.service";
 import { checkIpRateLimit, checkRateLimit, rateLimiters } from "../services/ratelimit.service";
@@ -252,6 +252,7 @@ export const deviceRoutes = new Elysia({ prefix: "/api/devices" })
         keyVersion: p.keyVersion,
         isDisabled: p.isDisabled,
         closesAt: p.closesAt?.toISOString() ?? null,
+        kind: p.kind,
         createdAt: p.createdAt.toISOString(),
         deliveries: stats.get(p.id)?.deliveries ?? 0,
         lastDeliveryAt: stats.get(p.id)?.lastDeliveryAt?.toISOString() ?? null,
@@ -285,15 +286,21 @@ export const deviceRoutes = new Elysia({ prefix: "/api/devices" })
       }
       const deposits = await listDeposits(params.id, cursor, DEPOSIT_PAGE_SIZE);
       return {
-        deposits: deposits.map((d) => ({
-          id: d.id,
-          createdAt: d.createdAt.toISOString(),
-          expiresAt: d.expiresAt.toISOString(),
-          sealedKey: b64(d.sealedKey),
-          encryptedTitle: d.encryptedTitle,
-          encryptedTitleIv: d.encryptedTitleIv,
-          files: d.files,
-        })),
+        deposits: await Promise.all(
+          deposits.map(async (d) => {
+            const answersUrl = await answersUrlOf(d);
+            return {
+              id: d.id,
+              createdAt: d.createdAt.toISOString(),
+              expiresAt: d.expiresAt.toISOString(),
+              sealedKey: b64(d.sealedKey),
+              encryptedTitle: d.encryptedTitle,
+              encryptedTitleIv: d.encryptedTitleIv,
+              files: d.files,
+              ...(answersUrl ? { answersUrl } : {}),
+            };
+          }),
+        ),
         nextCursor:
           deposits.length === DEPOSIT_PAGE_SIZE ? deposits[deposits.length - 1].createdAt.toISOString() : null,
       };

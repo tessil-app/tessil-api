@@ -376,6 +376,9 @@ export const portals = pgTable('portals', {
   // password and its link key. Set: the bundle and deposits need the token.
   // Without the link key the password cannot be guessed from this.
   accessHash: varchar('access_hash', { length: 64 }),
+  // 'portal' or 'form'. A form is a portal whose bundle holds questions.
+  // See docs/adr/0016-encrypted-forms.md.
+  kind: varchar('kind', { length: 8 }).default('portal').notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
 }, (table) => ({
   ownerIdx: index('portals_owner_id_idx').on(table.ownerId),

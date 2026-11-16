@@ -205,6 +205,7 @@ describe("the public read", () => {
       id,
       publicBundle: BUNDLE,
       keyVersion: 1,
+      kind: "portal",
       accepting: true,
       closesAt: null,
       maxFileSize: 5 * 1024 ** 3,

@@ -6,6 +6,7 @@ import { and, count, eq, sql } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { db } from "../db";
 import { files, portalInvites, portalMembers, portals, transfers, users, type Portal } from "../db/schema";
+import type { PortalKind } from "../config/tiers";
 import { softDeleteDepositsOf } from "./file.service";
 
 // nonce(12) + public key(65) + a short title + tag(16) at the least. The
@@ -58,6 +59,7 @@ export interface PortalForMember {
   closesAt: Date | null;
   notifyOnDelivery: boolean;
   hasPassword: boolean;
+  kind: string;
   createdAt: Date;
 }
 
@@ -90,12 +92,16 @@ export async function createPortal(
   maxPortals: number,
   blobs: { id: string; publicBundle: Uint8Array; sealedKeys: Uint8Array; depositToken: Uint8Array },
   switches: PortalSwitches = {},
+  kind: PortalKind = "portal",
 ): Promise<{ ok: true; portal: Portal } | { ok: false; reason: "limit_reached" | "id_taken" }> {
   return db.transaction(async (tx) => {
     await tx.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(${`portals:${ownerId}`}, 0))`,
     );
-    const [owned] = await tx.select({ n: count() }).from(portals).where(eq(portals.ownerId, ownerId));
+    const [owned] = await tx
+      .select({ n: count() })
+      .from(portals)
+      .where(and(eq(portals.ownerId, ownerId), eq(portals.kind, kind)));
     if (Number(owned?.n ?? 0) >= maxPortals) return { ok: false as const, reason: "limit_reached" as const };
 
     const [portal] = await tx
@@ -105,6 +111,7 @@ export async function createPortal(
         ownerId,
         publicBundle: blobs.publicBundle,
         depositTokenHash: hashDepositToken(blobs.depositToken),
+        kind,
         ...(switches.closesAt ? { closesAt: switches.closesAt } : {}),
         ...(switches.notifyOnDelivery ? { notifyOnDelivery: true } : {}),
         ...(switches.accessHash ? { accessHash: switches.accessHash } : {}),
@@ -136,6 +143,7 @@ export async function listPortalsForMember(userId: string): Promise<PortalForMem
       closesAt: portals.closesAt,
       notifyOnDelivery: portals.notifyOnDelivery,
       accessHash: portals.accessHash,
+      kind: portals.kind,
       createdAt: portals.createdAt,
       ownerId: portals.ownerId,
       ownerEmail: users.email,

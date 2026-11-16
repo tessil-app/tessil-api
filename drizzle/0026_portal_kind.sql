@@ -1,0 +1,1 @@
+ALTER TABLE "portals" ADD COLUMN "kind" varchar(8) DEFAULT 'portal' NOT NULL;
