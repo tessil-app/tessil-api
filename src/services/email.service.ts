@@ -379,7 +379,7 @@ export async function sendMagicLink(input: SendMagicLinkInput): Promise<void> {
 // Three short notices. They name the other person's address and nothing
 // about the portal: its title is encrypted and never reaches the server.
 
-export type PortalNotice =
+export type PortalNotice = (
   /** To the invitee: someone wants to share a portal with them. */
   | { kind: "invited"; to: string; ownerEmail: string }
   /** To the owner: the invitee now has a vault, so access can be given. */
@@ -387,7 +387,11 @@ export type PortalNotice =
   /** To the guest: the owner handed over access. */
   | { kind: "access_given"; to: string; ownerEmail: string }
   /** To a member: files arrived in a portal that has arrival emails on. */
-  | { kind: "delivery"; to: string; portalId: string; form?: boolean };
+  | { kind: "delivery"; to: string; portalId: string }
+) & {
+  /** About a form rather than a portal. */
+  form?: boolean;
+};
 
 interface NoticeContent {
   subject: string;
@@ -398,38 +402,41 @@ interface NoticeContent {
 }
 
 export function buildPortalNotice(notice: PortalNotice): NoticeContent {
-  const portals = `${env.APP_URL}/dashboard/portals`;
+  const noun = notice.form ? "form" : "portal";
+  const list = `${env.APP_URL}/dashboard/${noun}s`;
   switch (notice.kind) {
     case "invited":
       return {
-        subject: `${notice.ownerEmail} wants to share a Tessil portal with you`,
-        heading: "You're invited to a portal",
+        subject: `${notice.ownerEmail} wants to share a Tessil ${noun} with you`,
+        heading: `You're invited to a ${noun}`,
         paragraphs: [
-          `${notice.ownerEmail} wants to share a portal with you on Tessil. A portal is a link through which other people send them files, encrypted so only its members can open them.`,
+          notice.form
+            ? `${notice.ownerEmail} wants to share a form with you on Tessil. A form is a link through which other people answer their questions, encrypted so only its members can read the answers.`
+            : `${notice.ownerEmail} wants to share a portal with you on Tessil. A portal is a link through which other people send them files, encrypted so only its members can open them.`,
           "Sign in with this email address and set up a vault. A free account is enough. They can then give you access, and we'll email you when they have.",
         ],
-        button: { label: "Sign in to Tessil", url: portals },
+        button: { label: "Sign in to Tessil", url: list },
         footnote: `If you don't know ${notice.ownerEmail}, ignore this email. Nothing happens unless you sign in.`,
       };
     case "invitee_ready":
       return {
-        subject: `${notice.inviteeEmail} is ready for your portal`,
+        subject: `${notice.inviteeEmail} is ready for your ${noun}`,
         heading: "Your invite is ready",
         paragraphs: [
-          `${notice.inviteeEmail} has signed in and set up a vault. Open the portal and choose Sharing to give them access.`,
-          "This step happens in your browser, because only you hold the portal's keys.",
+          `${notice.inviteeEmail} has signed in and set up a vault. Open the ${noun} and choose Sharing to give them access.`,
+          `This step happens in your browser, because only you hold the ${noun}'s keys.`,
         ],
-        button: { label: "Open the portal", url: `${portals}/${notice.portalId}` },
-        footnote: "You're getting this because you invited them to a portal.",
+        button: { label: `Open the ${noun}`, url: `${list}/${notice.portalId}` },
+        footnote: `You're getting this because you invited them to a ${noun}.`,
       };
     case "access_given":
       return {
-        subject: `${notice.ownerEmail} shared a Tessil portal with you`,
-        heading: "A portal was shared with you",
+        subject: `${notice.ownerEmail} shared a Tessil ${noun} with you`,
+        heading: `A ${noun} was shared with you`,
         paragraphs: [
-          `${notice.ownerEmail} gave you access to a portal. Open your portals and accept it to see the files sent to it.`,
+          `${notice.ownerEmail} gave you access to a ${noun}. Open your ${noun}s and accept it to see ${notice.form ? "the responses" : "the files sent to it"}.`,
         ],
-        button: { label: "View your portals", url: portals },
+        button: { label: `View your ${noun}s`, url: list },
         footnote: `If you don't know ${notice.ownerEmail}, you can decline it there.`,
       };
     case "delivery":
@@ -441,7 +448,7 @@ export function buildPortalNotice(notice: PortalNotice): NoticeContent {
             "Someone filled in one of your forms. Open it to read their answers.",
             "We can't tell you which form by name or what was answered: both are encrypted and only you can read them.",
           ],
-          button: { label: "Open the form", url: `${env.APP_URL}/dashboard/forms/${notice.portalId}` },
+          button: { label: "Open the form", url: `${list}/${notice.portalId}` },
           footnote:
             "At most one of these per form per hour. The form's owner can switch them off in its settings.",
         };
@@ -453,7 +460,7 @@ export function buildPortalNotice(notice: PortalNotice): NoticeContent {
           "Someone sent files through one of your portals. Open it to see what came in.",
           "We can't tell you which portal by name or what was sent: both are encrypted and only you can read them.",
         ],
-        button: { label: "Open the portal", url: `${portals}/${notice.portalId}` },
+        button: { label: "Open the portal", url: `${list}/${notice.portalId}` },
         footnote:
           "At most one of these per portal per hour. The portal's owner can switch them off in its settings.",
       };

@@ -274,6 +274,7 @@ export const vaultRoutes = new Elysia({ prefix: "/api/me/vault" })
                 to: i.ownerEmail,
                 inviteeEmail: me.email,
                 portalId: i.portalId,
+                form: i.kind === "form",
               }),
             ),
           ),

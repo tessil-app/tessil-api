@@ -196,3 +196,22 @@ describe("the arrival email", () => {
     expect(content.button.url).toContain("/dashboard/portals/");
   });
 });
+
+describe("the sharing emails", () => {
+  it("speak of a form and link to the forms", () => {
+    const invited = buildPortalNotice({ kind: "invited", to: "a@example.com", ownerEmail: "o@example.com", form: true });
+    expect(invited.subject).toContain("form");
+    expect(invited.button.url).toContain("/dashboard/forms");
+    const ready = buildPortalNotice({
+      kind: "invitee_ready",
+      to: "o@example.com",
+      inviteeEmail: "a@example.com",
+      portalId: "p".repeat(21),
+      form: true,
+    });
+    expect(ready.button.url).toContain(`/dashboard/forms/${"p".repeat(21)}`);
+    const given = buildPortalNotice({ kind: "access_given", to: "a@example.com", ownerEmail: "o@example.com" });
+    expect(given.subject).toContain("portal");
+    expect(given.button.url).toContain("/dashboard/portals");
+  });
+});

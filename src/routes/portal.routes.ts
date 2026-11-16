@@ -733,7 +733,8 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
         } as const;
         return { error: messages[result.reason], code: `invite_${result.reason}` };
       }
-      void sendPortalNotice({ kind: "invited", to: email, ownerEmail: me.email });
+      const form = (await getPortal(params.id))?.kind === "form";
+      void sendPortalNotice({ kind: "invited", to: email, ownerEmail: me.email, form });
       set.status = 201;
       return { id: result.inviteId };
     },
@@ -821,7 +822,8 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
         userAgent: request.headers.get("user-agent"),
       });
       const guest = await findUserById(result.userId);
-      if (guest) void sendPortalNotice({ kind: "access_given", to: guest.email, ownerEmail: me.email });
+      const form = (await getPortal(params.id))?.kind === "form";
+      if (guest) void sendPortalNotice({ kind: "access_given", to: guest.email, ownerEmail: me.email, form });
       set.status = 201;
       return { userId: result.userId };
     },

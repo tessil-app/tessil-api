@@ -461,9 +461,9 @@ export async function removeGuest(
 /** Open invites for an address, with who sent each. Used to tell owners their invitee is ready. */
 export async function listInvitesForEmail(
   email: string,
-): Promise<{ portalId: string; ownerEmail: string }[]> {
+): Promise<{ portalId: string; ownerEmail: string; kind: string }[]> {
   return db
-    .select({ portalId: portalInvites.portalId, ownerEmail: users.email })
+    .select({ portalId: portalInvites.portalId, ownerEmail: users.email, kind: portals.kind })
     .from(portalInvites)
     .innerJoin(portals, eq(portals.id, portalInvites.portalId))
     .innerJoin(users, eq(users.id, portals.ownerId))
