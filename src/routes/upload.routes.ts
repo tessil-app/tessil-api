@@ -196,21 +196,28 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
   // per-Part round-trips. Monthly volume is charged here;
   // /abort-multipart releases it.
   .post('/init-multipart', async ({ body, ipContext, me, set }) => {
-    const rateLimit = await checkAuthedOrIpRateLimit(me?.id, ipContext, rateLimiters.upload);
+    const { transferId, contentType, encryptedName, encryptedNameIv, fileIv, size } = body;
+
+    // Looked up first: files for a form's response get a wider limit, as a
+    // whole room may answer from one connection. Anything else gets the usual one.
+    const transfer = isValidNanoId(transferId) ? await getValidTransfer(transferId) : null;
+    const toForm = transfer?.portalId ? (await getPortal(transfer.portalId))?.kind === 'form' : false;
+    const rateLimit = await checkAuthedOrIpRateLimit(
+      me?.id,
+      ipContext,
+      toForm ? rateLimiters.formUpload : rateLimiters.upload,
+    );
     if (!rateLimit.allowed) {
       set.status = 429;
       set.headers['Retry-After'] = String(rateLimit.resetIn);
       return { error: 'Rate limit exceeded. Try again later.' };
     }
 
-    const { transferId, contentType, encryptedName, encryptedNameIv, fileIv, size } = body;
-
     if (!isValidNanoId(transferId)) {
       set.status = 400;
       return { error: 'Invalid transfer ID' };
     }
 
-    const transfer = await getValidTransfer(transferId);
     if (!transfer) {
       set.status = 404;
       return { error: 'Transfer not found or has expired' };

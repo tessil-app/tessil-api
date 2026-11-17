@@ -377,14 +377,18 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
         set.status = 404;
         return NOT_FOUND;
       }
-      const limit = await checkIpRateLimit(ipContext, rateLimiters.portalPublic);
+      // Looked up first: a form's limit is wider. An unknown ID gets the narrow one.
+      const portal = await getPortal(params.id);
+      const limit = await checkIpRateLimit(
+        ipContext,
+        portal?.kind === "form" ? rateLimiters.formPublic : rateLimiters.portalPublic,
+      );
       if (!limit.allowed) {
         set.status = 429;
         set.headers["Retry-After"] = String(limit.resetIn);
         return { error: "Rate limit exceeded. Try again later." };
       }
 
-      const portal = await getPortal(params.id);
       if (!portal) {
         set.status = 404;
         return NOT_FOUND;
@@ -452,7 +456,13 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
         return NOT_FOUND;
       }
 
-      const perSource = await checkIpRateLimit(ipContext, rateLimiters.portalDepositPerSource);
+      // Looked up first: a form's limits are wider. An unknown ID gets the narrow one.
+      const portal = await getPortal(params.id);
+      const isForm = portal?.kind === "form";
+      const perSource = await checkIpRateLimit(
+        ipContext,
+        isForm ? rateLimiters.formResponsePerSource : rateLimiters.portalDepositPerSource,
+      );
       if (!perSource.allowed) {
         set.status = 429;
         set.headers["Retry-After"] = String(perSource.resetIn);
@@ -462,7 +472,6 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
       // The token shows the caller holds the portal's link, not just its
       // ID. A wrong token and an unknown portal look the same.
       const token = decodeBounded(body.depositToken, DEPOSIT_TOKEN_BYTES, DEPOSIT_TOKEN_BYTES);
-      const portal = await getPortal(params.id);
       if (!portal || !token || !depositTokenMatches(portal, token)) {
         set.status = 404;
         return NOT_FOUND;
@@ -486,7 +495,10 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
         return { error: "This portal has closed.", code: "portal_closed" };
       }
 
-      const perPortal = await checkRateLimit(portal.id, rateLimiters.portalDepositPerPortal);
+      const perPortal = await checkRateLimit(
+        portal.id,
+        isForm ? rateLimiters.formResponsePerForm : rateLimiters.portalDepositPerPortal,
+      );
       if (!perPortal.allowed) {
         set.status = 429;
         set.headers["Retry-After"] = String(perPortal.resetIn);

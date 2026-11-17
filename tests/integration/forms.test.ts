@@ -150,6 +150,27 @@ describe("a response to a form", () => {
     return { cookie, formId, transferId };
   }
 
+  it("may come from one source far more often than a portal's delivery", async () => {
+    const { formId } = await formWithResponse(ANSWERS_MIME_TYPE);
+    const statuses: number[] = [];
+    for (let i = 0; i < 25; i++) {
+      const started = await call(null, "POST", `/api/portals/${formId}/deposits`, { depositToken: TOKEN });
+      statuses.push(started.status);
+      const { transferId } = (await started.json()) as { transferId: string };
+      const init = await call(null, "POST", "/api/upload/init-multipart", {
+        transferId,
+        size: 1024,
+        contentType: ANSWERS_MIME_TYPE,
+        ...FILE_FIELDS,
+      });
+      statuses.push(init.status);
+    }
+    expect(statuses.filter((s) => s === 201)).toHaveLength(25);
+    expect(statuses.filter((s) => s === 200)).toHaveLength(25);
+    for (let i = 0; i < 35; i++) statuses.push((await call(null, "GET", `/api/portals/${formId}/public`)).status);
+    expect(statuses).not.toContain(429);
+  });
+
   it("comes with a link to its answers file", async () => {
     const { cookie, formId, transferId } = await formWithResponse(ANSWERS_MIME_TYPE);
     const list = (await (await call(cookie, "GET", `/api/portals/${formId}/deposits`)).json()) as {

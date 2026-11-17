@@ -632,6 +632,12 @@ export const rateLimiters = {
   // source and per portal instead of by anyone's upload allowance.
   portalDepositPerSource: { prefix: 'portal-deposit-source', windowSeconds: HOUR_SECONDS, maxRequests: 10 },
   portalDepositPerPortal: { prefix: 'portal-deposit-portal', windowSeconds: HOUR_SECONDS, maxRequests: 60 },
+  // A form can be filled in by a whole room on one connection, and a
+  // response without files is small, so forms get far more room.
+  formPublic: { prefix: 'form-public', windowSeconds: 60, maxRequests: 240 },
+  formResponsePerSource: { prefix: 'form-response-source', windowSeconds: HOUR_SECONDS, maxRequests: 300 },
+  formResponsePerForm: { prefix: 'form-response-form', windowSeconds: HOUR_SECONDS, maxRequests: 1000 },
+  formUpload: { prefix: 'form-upload', windowSeconds: 60, maxRequests: 300 },
   // Password tries on a portal, right or wrong.
   portalUnlockPerSource: { prefix: 'portal-unlock-source', windowSeconds: 15 * 60, maxRequests: 20 },
   portalUnlockPerPortal: { prefix: 'portal-unlock-portal', windowSeconds: HOUR_SECONDS, maxRequests: 300 },
