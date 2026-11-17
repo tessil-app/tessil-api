@@ -8,7 +8,7 @@ import { createApp } from "../../src/app";
 import { db } from "../../src/db";
 import { portals, users } from "../../src/db/schema";
 import { buildPortalNotice } from "../../src/services/email.service";
-import { ANSWERS_MIME_TYPE } from "../../src/services/file.service";
+import { ANSWERS_MAX_BYTES, ANSWERS_MIME_TYPE } from "../../src/services/file.service";
 import { resetRateLimits } from "../../src/services/ratelimit.service";
 import { authedRequest, createAuthedUser } from "../helpers/auth";
 import { ensureMigrations, resetDb } from "../helpers/db";
@@ -119,7 +119,7 @@ describe("creating a form", () => {
 });
 
 describe("a response to a form", () => {
-  async function formWithResponse(contentType: string) {
+  async function formWithResponse(contentType: string, size = 1024) {
     const { cookie } = await account("pro");
     const formId = nanoid();
     await call(cookie, "POST", "/api/portals", {
@@ -140,7 +140,7 @@ describe("a response to a form", () => {
     const { transferId } = (await started.json()) as { transferId: string };
     const init = await call(null, "POST", "/api/upload/init-multipart", {
       transferId,
-      size: 1024,
+      size,
       contentType,
       ...FILE_FIELDS,
     });
@@ -159,6 +159,15 @@ describe("a response to a form", () => {
     expect(list.deposits[0].id).toBe(transferId);
     expect(list.deposits[0].answersUrl).toContain(transferId);
     // The answers file is still listed; the reader hides it.
+    expect(list.deposits[0].files).toHaveLength(1);
+  });
+
+  it("has no answers link when the answers file is too large to be one", async () => {
+    const { cookie, formId } = await formWithResponse(ANSWERS_MIME_TYPE, ANSWERS_MAX_BYTES + 1);
+    const list = (await (await call(cookie, "GET", `/api/portals/${formId}/deposits`)).json()) as {
+      deposits: { answersUrl?: string; files: unknown[] }[];
+    };
+    expect(list.deposits[0].answersUrl).toBeUndefined();
     expect(list.deposits[0].files).toHaveLength(1);
   });
 

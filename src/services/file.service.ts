@@ -725,6 +725,8 @@ export async function getFilesForTransfer(transferId: string): Promise<File[]> {
 
 /** The content type of a form response's answers file. See docs/adr/0016-encrypted-forms.md. */
 export const ANSWERS_MIME_TYPE = 'application/vnd.tessil.answers+json';
+// The visitor picks the content type, so a larger file is not treated as answers.
+export const ANSWERS_MAX_BYTES = 2 * 1024 * 1024;
 
 export interface DepositSummary {
   id: string;
@@ -792,7 +794,9 @@ export async function listDeposits(
         size: Number(f.size),
         mimeType: f.mimeType,
       })),
-      answersR2Key: depositFiles.find((f) => f.mimeType === ANSWERS_MIME_TYPE)?.r2Key ?? null,
+      answersR2Key:
+        depositFiles.find((f) => f.mimeType === ANSWERS_MIME_TYPE && Number(f.size) <= ANSWERS_MAX_BYTES)
+          ?.r2Key ?? null,
     });
   }
   return result;
