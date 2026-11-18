@@ -6,7 +6,7 @@ import { eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { createApp } from "../../src/app";
 import { db } from "../../src/db";
-import { portals, users } from "../../src/db/schema";
+import { formTemplates, portals, users } from "../../src/db/schema";
 import { buildPortalNotice } from "../../src/services/email.service";
 import { ANSWERS_MAX_BYTES, ANSWERS_MIME_TYPE } from "../../src/services/file.service";
 import { resetRateLimits } from "../../src/services/ratelimit.service";
@@ -243,5 +243,71 @@ describe("the sharing emails", () => {
     const given = buildPortalNotice({ kind: "access_given", to: "a@example.com", ownerEmail: "o@example.com" });
     expect(given.subject).toContain("portal");
     expect(given.button.url).toContain("/dashboard/portals");
+  });
+});
+
+describe("form templates", () => {
+  const BLOB = b64(new Uint8Array(600).fill(8));
+  const save = (cookie: string | null, id = nanoid(), ciphertext = BLOB) =>
+    call(cookie, "POST", "/api/form-templates", { id, ciphertext });
+
+  it("keeps a blob, lists it newest first, and deletes it", async () => {
+    const { cookie } = await account("pro");
+    const first = nanoid();
+    const second = nanoid();
+    expect((await save(cookie, first)).status).toBe(201);
+    expect((await save(cookie, second, b64(new Uint8Array(40).fill(9)))).status).toBe(201);
+
+    const list = (await (await call(cookie, "GET", "/api/form-templates")).json()) as {
+      max: number;
+      templates: { id: string; ciphertext: string }[];
+    };
+    expect(list.max).toBe(20);
+    expect(list.templates.map((x) => x.id).sort()).toEqual([first, second].sort());
+    expect(list.templates.find((x) => x.id === first)?.ciphertext).toBe(BLOB);
+
+    expect((await call(cookie, "DELETE", `/api/form-templates/${first}`)).status).toBe(200);
+    expect((await call(cookie, "DELETE", `/api/form-templates/${first}`)).status).toBe(404);
+    expect(await db.select().from(formTemplates)).toHaveLength(1);
+  });
+
+  it("belongs to one account", async () => {
+    const mine = await account("pro");
+    const theirs = await account("max");
+    const id = nanoid();
+    expect((await save(mine.cookie, id)).status).toBe(201);
+    const list = (await (await call(theirs.cookie, "GET", "/api/form-templates")).json()) as { templates: unknown[] };
+    expect(list.templates).toHaveLength(0);
+    expect((await call(theirs.cookie, "DELETE", `/api/form-templates/${id}`)).status).toBe(404);
+    expect((await call(null, "GET", "/api/form-templates")).status).toBe(401);
+    expect((await save(null)).status).toBe(401);
+  });
+
+  it("comes with the plans that have forms", async () => {
+    const { cookie } = await account("free");
+    const res = await save(cookie);
+    expect(res.status).toBe(402);
+    expect(((await res.json()) as { code: string }).code).toBe("forms_require_paid_plan");
+  });
+
+  it("refuses what is not a template, an ID twice, and more than the limit", async () => {
+    const { user, cookie } = await account("pro");
+    expect((await save(cookie, "short")).status).toBe(400);
+    expect((await save(cookie, nanoid(), "not base64!")).status).toBe(400);
+    expect((await save(cookie, nanoid(), b64(new Uint8Array(10)))).status).toBe(400);
+    expect((await save(cookie, nanoid(), b64(new Uint8Array(72 * 1024 + 1)))).status).toBe(400);
+
+    const id = nanoid();
+    expect((await save(cookie, id)).status).toBe(201);
+    const again = await save(cookie, id);
+    expect(again.status).toBe(409);
+    expect(((await again.json()) as { code: string }).code).toBe("template_id_taken");
+
+    await db.insert(formTemplates).values(
+      Array.from({ length: 19 }, () => ({ id: nanoid(), userId: user.id, ciphertext: new Uint8Array(40) })),
+    );
+    const full = await save(cookie);
+    expect(full.status).toBe(409);
+    expect(((await full.json()) as { code: string }).code).toBe("template_limit_reached");
   });
 });
