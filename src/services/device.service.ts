@@ -362,6 +362,7 @@ export interface GrantedPortal {
   keyVersion: number;
   isDisabled: boolean;
   closesAt: Date | null;
+  kind: string;
   createdAt: Date;
 }
 
@@ -381,6 +382,7 @@ export async function listPortalsForDevice(device: Device): Promise<GrantedPorta
       keyVersion: devicePortalKeys.keyVersion,
       isDisabled: portals.isDisabled,
       closesAt: portals.closesAt,
+      kind: portals.kind,
       createdAt: portals.createdAt,
     })
     .from(devicePortalKeys)

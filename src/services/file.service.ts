@@ -723,6 +723,11 @@ export async function getFilesForTransfer(transferId: string): Promise<File[]> {
 
 // ─── deposits, as a portal member sees them ─────────────────────────────────
 
+/** The content type of a form response's answers file. See docs/adr/0016-encrypted-forms.md. */
+export const ANSWERS_MIME_TYPE = 'application/vnd.tessil.answers+json';
+// The visitor picks the content type, so a larger file is not treated as answers.
+export const ANSWERS_MAX_BYTES = 2 * 1024 * 1024;
+
 export interface DepositSummary {
   id: string;
   createdAt: Date;
@@ -738,6 +743,15 @@ export interface DepositSummary {
     size: number;
     mimeType: string | null;
   }[];
+  /** Storage key of a form response's answers file, if it has one. */
+  answersR2Key: string | null;
+}
+
+/** A short-lived link to a response's answers file, so a reader needs no request per response. */
+export async function answersUrlOf(deposit: DepositSummary): Promise<string | null> {
+  if (!deposit.answersR2Key) return null;
+  const { getPresignedDownloadUrl } = await import('./r2.service');
+  return (await getPresignedDownloadUrl(deposit.answersR2Key, deposit.expiresAt)).url;
 }
 
 /** Completed, unexpired deposits of a portal, newest first. */
@@ -780,6 +794,9 @@ export async function listDeposits(
         size: Number(f.size),
         mimeType: f.mimeType,
       })),
+      answersR2Key:
+        depositFiles.find((f) => f.mimeType === ANSWERS_MIME_TYPE && Number(f.size) <= ANSWERS_MAX_BYTES)
+          ?.r2Key ?? null,
     });
   }
   return result;

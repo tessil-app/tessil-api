@@ -344,6 +344,20 @@ export const vaultItems = pgTable('vault_items', {
   userKindUnique: uniqueIndex('vault_items_user_kind_unique').on(table.userId, table.kind),
 }));
 
+// A form's setup kept for reuse: questions and texts, encrypted in the
+// browser under the owner's vault. The server holds the blob and cannot
+// read it. See docs/adr/0016-encrypted-forms.md.
+export const formTemplates = pgTable('form_templates', {
+  id: varchar('id', { length: 21 }).primaryKey(), // nanoid, chosen by the browser and bound into the encryption
+  userId: varchar('user_id', { length: 21 })
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  ciphertext: bytea('ciphertext').notNull(), // a vault item: version(1) || iv(12) || AES-GCM output
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  userIdx: index('form_templates_user_id_idx').on(table.userId),
+}));
+
 // A portal: a persistent link where outsiders upload files only its
 // members can read. The server holds two opaque blobs per portal and can
 // read neither. See docs/adr/0014-portal-keys-and-vault-items.md.
@@ -376,6 +390,9 @@ export const portals = pgTable('portals', {
   // password and its link key. Set: the bundle and deposits need the token.
   // Without the link key the password cannot be guessed from this.
   accessHash: varchar('access_hash', { length: 64 }),
+  // 'portal' or 'form'. A form is a portal whose bundle holds questions.
+  // See docs/adr/0016-encrypted-forms.md.
+  kind: varchar('kind', { length: 8 }).default('portal').notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
 }, (table) => ({
   ownerIdx: index('portals_owner_id_idx').on(table.ownerId),

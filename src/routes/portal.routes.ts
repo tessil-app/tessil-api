@@ -31,6 +31,7 @@ import { findUserById } from "../auth/users";
 import type { Portal } from "../db/schema";
 import { sendPortalNotice } from "../services/email.service";
 import {
+  answersUrlOf,
   createDeposit,
   getDepositFile,
   listDeposits,
@@ -43,7 +44,7 @@ import {
   validateEncryptedTitle,
 } from "../utils/encryptedTitle";
 import { isLikelyEmail, normaliseEmail } from "../auth/tokens";
-import { MAX_PORTAL_GUESTS, resolveCaps } from "../config/tiers";
+import { MAX_PORTAL_GUESTS, limitFor, resolveCaps } from "../config/tiers";
 import { checkIpRateLimit, checkRateLimit, rateLimiters } from "../services/ratelimit.service";
 import {
   ACCESS_TOKEN_BYTES,
@@ -106,7 +107,8 @@ async function publicView(portal: Portal) {
     id: portal.id,
     publicBundle: b64(portal.publicBundle),
     keyVersion: portal.keyVersion,
-    accepting: !portal.isDisabled && !isClosed(portal) && ownerCaps.maxPortals > 0,
+    kind: portal.kind,
+    accepting: !portal.isDisabled && !isClosed(portal) && limitFor(ownerCaps, portal.kind) > 0,
     // So the page can say until when, or that the date has passed.
     closesAt: portal.closesAt?.toISOString() ?? null,
     // So the deposit page can say what fits before anything is uploaded.
@@ -147,13 +149,13 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
       }
 
       const caps = resolveCaps(me);
-      if (caps.maxPortals === 0) {
+      const kind = body.kind ?? "portal";
+      const allowed = limitFor(caps, kind);
+      if (allowed === 0) {
         set.status = 402;
-        return {
-          error: "Portals are part of the paid plans.",
-          code: "portals_require_paid_plan",
-          upgradeUrl: "/pricing",
-        };
+        return kind === "form"
+          ? { error: "Forms are part of the paid plans.", code: "forms_require_paid_plan", upgradeUrl: "/pricing" }
+          : { error: "Portals are part of the paid plans.", code: "portals_require_paid_plan", upgradeUrl: "/pricing" };
       }
       // The portal's keys are sealed to this key; without it nothing could open them.
       if (!me.publicKey) {
@@ -182,16 +184,17 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
 
       const result = await createPortal(
         me.id,
-        caps.maxPortals,
+        allowed,
         { id: body.id, publicBundle, sealedKeys, depositToken },
         { closesAt, notifyOnDelivery: body.notifyOnDelivery, accessHash },
+        kind,
       );
       if (!result.ok) {
         set.status = 409;
         return result.reason === "limit_reached"
           ? {
-              error: `Your plan includes ${caps.maxPortals} portals.`,
-              code: "portal_limit_reached",
+              error: `Your plan includes ${allowed} ${kind === "form" ? "forms" : "portals"}.`,
+              code: kind === "form" ? "form_limit_reached" : "portal_limit_reached",
               upgradeUrl: "/pricing",
             }
           : { error: "That portal ID is taken. Try again.", code: "portal_id_taken" };
@@ -218,6 +221,7 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
         closesAt: t.Optional(t.Nullable(t.String({ maxLength: 40 }))),
         notifyOnDelivery: t.Optional(t.Boolean()),
         accessToken: t.Optional(t.Nullable(t.String({ maxLength: 64 }))),
+        kind: t.Optional(t.Union([t.Literal("portal"), t.Literal("form")])),
       }),
     },
   )
@@ -228,10 +232,13 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
       return { error: "Not authenticated" };
     }
     const [rows, stats] = await Promise.all([listPortalsForMember(me.id), portalStatsForMember(me.id)]);
+    const caps = resolveCaps(me);
     return {
-      maxPortals: resolveCaps(me).maxPortals,
+      maxPortals: caps.maxPortals,
+      maxForms: caps.maxForms,
       portals: rows.map((row) => ({
         id: row.id,
+        kind: row.kind,
         role: row.role,
         // For a guest: who handed them the keys, to check the handover against.
         owner: {
@@ -370,14 +377,18 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
         set.status = 404;
         return NOT_FOUND;
       }
-      const limit = await checkIpRateLimit(ipContext, rateLimiters.portalPublic);
+      // Looked up first: a form's limit is wider. An unknown ID gets the narrow one.
+      const portal = await getPortal(params.id);
+      const limit = await checkIpRateLimit(
+        ipContext,
+        portal?.kind === "form" ? rateLimiters.formPublic : rateLimiters.portalPublic,
+      );
       if (!limit.allowed) {
         set.status = 429;
         set.headers["Retry-After"] = String(limit.resetIn);
         return { error: "Rate limit exceeded. Try again later." };
       }
 
-      const portal = await getPortal(params.id);
       if (!portal) {
         set.status = 404;
         return NOT_FOUND;
@@ -445,7 +456,13 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
         return NOT_FOUND;
       }
 
-      const perSource = await checkIpRateLimit(ipContext, rateLimiters.portalDepositPerSource);
+      // Looked up first: a form's limits are wider. An unknown ID gets the narrow one.
+      const portal = await getPortal(params.id);
+      const isForm = portal?.kind === "form";
+      const perSource = await checkIpRateLimit(
+        ipContext,
+        isForm ? rateLimiters.formResponsePerSource : rateLimiters.portalDepositPerSource,
+      );
       if (!perSource.allowed) {
         set.status = 429;
         set.headers["Retry-After"] = String(perSource.resetIn);
@@ -455,14 +472,13 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
       // The token shows the caller holds the portal's link, not just its
       // ID. A wrong token and an unknown portal look the same.
       const token = decodeBounded(body.depositToken, DEPOSIT_TOKEN_BYTES, DEPOSIT_TOKEN_BYTES);
-      const portal = await getPortal(params.id);
       if (!portal || !token || !depositTokenMatches(portal, token)) {
         set.status = 404;
         return NOT_FOUND;
       }
       const owner = await findUserById(portal.ownerId);
       const ownerCaps = resolveCaps(owner && !owner.deletedAt ? owner : null);
-      if (portal.isDisabled || ownerCaps.maxPortals === 0 || ownerCaps.depositRetentionDays === null) {
+      if (portal.isDisabled || limitFor(ownerCaps, portal.kind) === 0 || ownerCaps.depositRetentionDays === null) {
         set.status = 403;
         return { error: "This portal is not accepting files right now.", code: "portal_not_accepting" };
       }
@@ -479,7 +495,10 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
         return { error: "This portal has closed.", code: "portal_closed" };
       }
 
-      const perPortal = await checkRateLimit(portal.id, rateLimiters.portalDepositPerPortal);
+      const perPortal = await checkRateLimit(
+        portal.id,
+        isForm ? rateLimiters.formResponsePerForm : rateLimiters.portalDepositPerPortal,
+      );
       if (!perPortal.allowed) {
         set.status = 429;
         set.headers["Retry-After"] = String(perPortal.resetIn);
@@ -545,15 +564,21 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
         // Deliveries newer than this are new to the member. The page
         // reports back with POST /:id/seen once it has shown them.
         lastSeenAt: lastSeenAt?.toISOString() ?? null,
-        deposits: deposits.map((d) => ({
-          id: d.id,
-          createdAt: d.createdAt.toISOString(),
-          expiresAt: d.expiresAt.toISOString(),
-          sealedKey: b64(d.sealedKey),
-          encryptedTitle: d.encryptedTitle,
-          encryptedTitleIv: d.encryptedTitleIv,
-          files: d.files,
-        })),
+        deposits: await Promise.all(
+          deposits.map(async (d) => {
+            const answersUrl = await answersUrlOf(d);
+            return {
+              id: d.id,
+              createdAt: d.createdAt.toISOString(),
+              expiresAt: d.expiresAt.toISOString(),
+              sealedKey: b64(d.sealedKey),
+              encryptedTitle: d.encryptedTitle,
+              encryptedTitleIv: d.encryptedTitleIv,
+              files: d.files,
+              ...(answersUrl ? { answersUrl } : {}),
+            };
+          }),
+        ),
         nextCursor:
           deposits.length === DEPOSIT_PAGE_SIZE
             ? deposits[deposits.length - 1].createdAt.toISOString()
@@ -720,7 +745,8 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
         } as const;
         return { error: messages[result.reason], code: `invite_${result.reason}` };
       }
-      void sendPortalNotice({ kind: "invited", to: email, ownerEmail: me.email });
+      const form = (await getPortal(params.id))?.kind === "form";
+      void sendPortalNotice({ kind: "invited", to: email, ownerEmail: me.email, form });
       set.status = 201;
       return { id: result.inviteId };
     },
@@ -808,7 +834,8 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
         userAgent: request.headers.get("user-agent"),
       });
       const guest = await findUserById(result.userId);
-      if (guest) void sendPortalNotice({ kind: "access_given", to: guest.email, ownerEmail: me.email });
+      const form = (await getPortal(params.id))?.kind === "form";
+      if (guest) void sendPortalNotice({ kind: "access_given", to: guest.email, ownerEmail: me.email, form });
       set.status = 201;
       return { userId: result.userId };
     },

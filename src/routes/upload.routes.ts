@@ -14,7 +14,7 @@ import {
   releaseAuthedOrIpVolumeLimit,
   releaseVolumeLimit,
 } from '../services/ratelimit.service';
-import { resolveCaps } from '../config/tiers';
+import { limitFor, resolveCaps } from '../config/tiers';
 import { findUserById } from '../auth/users';
 import { claimDeliveryNotice, getPortal } from '../services/portal.service';
 import { deviceAccess } from '../auth/deviceAuth';
@@ -50,7 +50,7 @@ async function depositTarget(portalId: string): Promise<{ owner: User } | null> 
   const portal = await getPortal(portalId);
   if (!portal || portal.isDisabled) return null;
   const owner = await findUserById(portal.ownerId);
-  if (!owner || owner.deletedAt || resolveCaps(owner).maxPortals === 0) return null;
+  if (!owner || owner.deletedAt || limitFor(resolveCaps(owner), portal.kind) === 0) return null;
   return { owner };
 }
 
@@ -59,7 +59,9 @@ async function depositTarget(portalId: string): Promise<{ owner: User } | null> 
 async function notifyOfDelivery(portalId: string): Promise<void> {
   try {
     const recipients = await claimDeliveryNotice(portalId);
-    await Promise.all(recipients.map((to) => sendPortalNotice({ kind: 'delivery', to, portalId })));
+    if (recipients.length === 0) return;
+    const form = (await getPortal(portalId))?.kind === 'form';
+    await Promise.all(recipients.map((to) => sendPortalNotice({ kind: 'delivery', to, portalId, form })));
   } catch (err) {
     console.error('[portal] delivery notice failed', err instanceof Error ? err.message : err);
   }
@@ -194,21 +196,28 @@ export const uploadRoutes = new Elysia({ prefix: '/api/upload' })
   // per-Part round-trips. Monthly volume is charged here;
   // /abort-multipart releases it.
   .post('/init-multipart', async ({ body, ipContext, me, set }) => {
-    const rateLimit = await checkAuthedOrIpRateLimit(me?.id, ipContext, rateLimiters.upload);
+    const { transferId, contentType, encryptedName, encryptedNameIv, fileIv, size } = body;
+
+    // Looked up first: files for a form's response get a wider limit, as a
+    // whole room may answer from one connection. Anything else gets the usual one.
+    const transfer = isValidNanoId(transferId) ? await getValidTransfer(transferId) : null;
+    const toForm = transfer?.portalId ? (await getPortal(transfer.portalId))?.kind === 'form' : false;
+    const rateLimit = await checkAuthedOrIpRateLimit(
+      me?.id,
+      ipContext,
+      toForm ? rateLimiters.formUpload : rateLimiters.upload,
+    );
     if (!rateLimit.allowed) {
       set.status = 429;
       set.headers['Retry-After'] = String(rateLimit.resetIn);
       return { error: 'Rate limit exceeded. Try again later.' };
     }
 
-    const { transferId, contentType, encryptedName, encryptedNameIv, fileIv, size } = body;
-
     if (!isValidNanoId(transferId)) {
       set.status = 400;
       return { error: 'Invalid transfer ID' };
     }
 
-    const transfer = await getValidTransfer(transferId);
     if (!transfer) {
       set.status = 404;
       return { error: 'Transfer not found or has expired' };
