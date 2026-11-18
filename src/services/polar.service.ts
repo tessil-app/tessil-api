@@ -65,6 +65,9 @@ export async function createCheckout(
     products: [productId],
     externalCustomerId: user.id,
     customerEmail: user.email,
+    // Polar copies this to the subscription. It names the buyer even when
+    // Polar already knew the customer and so leaves the external ID unset.
+    metadata: { tessil_user_id: user.id },
     successUrl,
   });
 
