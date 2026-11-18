@@ -372,14 +372,16 @@ export const billingRoutes = new Elysia({ prefix: "/api/billing" })
         // failed must run again, or a cancellation or refund that hit a
         // transient error would be acknowledged and never applied.
         const [seen] = await db
-          .select({ id: billingEvents.id, processedAt: billingEvents.processedAt })
+          .select({ id: billingEvents.id, processedAt: billingEvents.processedAt, error: billingEvents.error })
           .from(billingEvents)
           .where(eq(billingEvents.polarEventId, polarEventId));
         if (!seen) {
           set.status = 500;
           return { error: "Could not record the event" };
         }
-        if (seen.processedAt) {
+        // One that was looked at and skipped (no account found for it) is
+        // not done either: sent again, it gets another chance.
+        if (seen.processedAt && !seen.error) {
           console.warn("[billing] duplicate webhook delivery, skipping:", event.type);
           return { ok: true, deduplicated: true };
         }

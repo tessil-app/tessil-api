@@ -749,4 +749,23 @@ describe("POST /api/billing/webhook: a customer Polar knew before", () => {
     expect(res.status).toBe(200);
     expect(await tierOf(user.id)).toBe("free");
   });
+
+  it("applies a skipped delivery when the same one is sent again", async () => {
+    // First time nobody has this email; the event is recorded and skipped.
+    const payload = unlinked("sub_again", { email: "later@example.test", emailVerified: true });
+    const signed = signEvent(payload, "msg_sent_twice");
+    const deliver = () =>
+      app.handle(new Request(`${APP_URL}/api/billing/webhook`, { method: "POST", headers: signed.headers, body: signed.body }));
+    expect((await deliver()).status).toBe(200);
+    expect(await db.select().from(subscriptions)).toHaveLength(0);
+
+    const { user } = await createAuthedUser("later@example.test");
+    expect((await deliver()).status).toBe(200);
+    expect(await tierOf(user.id)).toBe("pro");
+    const events = await db.select().from(billingEvents);
+    expect(events).toHaveLength(1);
+    expect(events[0].error).toBeNull();
+    // And once applied, a third copy is a duplicate.
+    expect(await (await deliver()).json()).toMatchObject({ deduplicated: true });
+  });
 });
