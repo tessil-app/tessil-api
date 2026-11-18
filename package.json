@@ -23,7 +23,8 @@
     "ioredis": "^5.9.2",
     "maxmind": "^5.0.6",
     "nanoid": "^5.0.9",
-    "postgres": "^3.4.5"
+    "postgres": "^3.4.5",
+    "standardwebhooks": "1.0.0"
   },
   "devDependencies": {
     "@commitlint/cli": "^21.0.0",

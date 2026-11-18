@@ -6,6 +6,11 @@
 import type { PaidTier } from "../config/tiers";
 import { Polar } from "@polar-sh/sdk";
 import { validateEvent, WebhookVerificationError } from "@polar-sh/sdk/webhooks";
+import {
+  resignForSdk,
+  verifyWebhookSignature,
+  WebhookVerificationError as SignatureError,
+} from "./webhookSignature";
 import { env } from "../config/env";
 import type { User } from "../db/schema";
 
@@ -96,10 +101,18 @@ export function parseWebhook(
 ): ReturnType<typeof validateEvent> {
   if (!env.POLAR_WEBHOOK_SECRET) {
     throw new Error(
-      "POLAR_WEBHOOK_SECRET is not set — refusing to process Polar webhooks without verification.",
+      "POLAR_WEBHOOK_SECRET is not set. Refusing to process Polar webhooks without verification.",
     );
   }
-  return validateEvent(body, headers, env.POLAR_WEBHOOK_SECRET);
+  // Verified here, under the old signing or the new. See webhookSignature.ts.
+  try {
+    verifyWebhookSignature(body, headers, env.POLAR_WEBHOOK_SECRET);
+  } catch (err) {
+    if (err instanceof SignatureError) throw new WebhookVerificationError(err.message);
+    throw err;
+  }
+  const again = resignForSdk(body, headers);
+  return validateEvent(body, again.headers, again.secret);
 }
 
 export { WebhookVerificationError };
