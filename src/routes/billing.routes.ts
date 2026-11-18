@@ -7,6 +7,7 @@ import { Elysia, t } from "elysia";
 import { desc, eq } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { authPlugin } from "../auth/middleware";
+import { findUserByEmail } from "../auth/users";
 import { env } from "../config/env";
 import type { PaidTier } from "../config/tiers";
 import { db } from "../db";
@@ -40,10 +41,44 @@ interface PolarSubscriptionData {
   /** Which product was bought; decides the plan. */
   productId?: string | null;
   customerId: string;
+  /** Copied by Polar from the checkout we made; carries our user ID. */
+  metadata?: Record<string, unknown> | null;
   customer: {
     id: string;
     externalId?: string | null;
+    email?: string | null;
+    emailVerified?: boolean | null;
   };
+}
+
+/** The key under which a checkout carries the buyer's account. See createCheckout. */
+const USER_ID_METADATA = "tessil_user_id";
+
+// Which account an event is for. Polar only links a customer to our user ID
+// when it creates the customer at that checkout; someone who was already a
+// customer there (a donor, an earlier purchase) comes back with no link.
+// So, in order of how sure each is:
+//   1. the ID we gave Polar for the customer
+//   2. the account that already holds this subscription
+//   3. the ID our checkout carried in its metadata
+//   4. the account with the customer's email, if Polar has verified it
+async function accountFor(data: PolarSubscriptionData): Promise<string | null> {
+  if (data.customer.externalId) return data.customer.externalId;
+
+  const [held] = await db
+    .select({ userId: subscriptions.userId })
+    .from(subscriptions)
+    .where(eq(subscriptions.polarSubscriptionId, data.id));
+  if (held) return held.userId;
+
+  const carried = data.metadata?.[USER_ID_METADATA];
+  if (typeof carried === "string" && carried.length > 0) return carried;
+
+  if (data.customer.emailVerified === true && data.customer.email) {
+    const user = await findUserByEmail(data.customer.email);
+    if (user && !user.deletedAt) return user.id;
+  }
+  return null;
 }
 
 // When Polar says the event happened. A payload without a usable
@@ -79,9 +114,9 @@ async function applySubscriptionState(
   data: PolarSubscriptionData,
   eventAt: Date,
 ): Promise<HandlerResult> {
-  const externalId = data.customer.externalId;
+  const externalId = await accountFor(data);
   if (!externalId) {
-    console.warn(`[billing] event for ${data.id} has no externalCustomerId, skipping`);
+    console.warn(`[billing] event for ${data.id} names no account we know, skipping`);
     return { ok: false, reason: "no external id" };
   }
 
@@ -155,7 +190,7 @@ async function applyTerminalCancel(
   data: PolarSubscriptionData,
   eventAt: Date,
 ): Promise<HandlerResult> {
-  const externalId = data.customer.externalId;
+  const externalId = await accountFor(data);
   if (!externalId) {
     return { ok: false, reason: "no external id" };
   }
@@ -337,14 +372,16 @@ export const billingRoutes = new Elysia({ prefix: "/api/billing" })
         // failed must run again, or a cancellation or refund that hit a
         // transient error would be acknowledged and never applied.
         const [seen] = await db
-          .select({ id: billingEvents.id, processedAt: billingEvents.processedAt })
+          .select({ id: billingEvents.id, processedAt: billingEvents.processedAt, error: billingEvents.error })
           .from(billingEvents)
           .where(eq(billingEvents.polarEventId, polarEventId));
         if (!seen) {
           set.status = 500;
           return { error: "Could not record the event" };
         }
-        if (seen.processedAt) {
+        // One that was looked at and skipped (no account found for it) is
+        // not done either: sent again, it gets another chance.
+        if (seen.processedAt && !seen.error) {
           console.warn("[billing] duplicate webhook delivery, skipping:", event.type);
           return { ok: true, deduplicated: true };
         }

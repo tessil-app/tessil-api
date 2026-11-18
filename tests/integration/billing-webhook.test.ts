@@ -692,3 +692,80 @@ describe("POST /api/billing/portal — auth + customer gate", () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe("POST /api/billing/webhook: a customer Polar knew before", () => {
+  // Polar links a customer to our user ID only when it creates the customer
+  // at our checkout. Someone it already knew comes back without that link.
+  const send = (payload: object) => {
+    const signed = signEvent(payload);
+    return app.handle(
+      new Request(`${APP_URL}/api/billing/webhook`, { method: "POST", headers: signed.headers, body: signed.body }),
+    );
+  };
+  function unlinked(subscriptionId: string, customer: object, extra: object = {}) {
+    const base = subscriptionCreatedPayload({ subscriptionId, customerId: `cus_${subscriptionId}`, externalId: null });
+    return { ...base, data: { ...base.data, ...extra, customer: { ...base.data.customer, ...customer } } };
+  }
+  const tierOf = async (id: string) => (await db.select().from(users).where(eq(users.id, id)))[0].tier;
+
+  it("finds the account in what our checkout carried", async () => {
+    const { user } = await createAuthedUser();
+    const res = await send(unlinked("sub_meta", { email: "someone-else@example.test" }, { metadata: { tessil_user_id: user.id } }));
+    expect(res.status).toBe(200);
+    expect(await tierOf(user.id)).toBe("pro");
+    const [row] = await db.select().from(subscriptions).where(eq(subscriptions.userId, user.id));
+    expect(row.polarSubscriptionId).toBe("sub_meta");
+    const [updated] = await db.select().from(users).where(eq(users.id, user.id));
+    expect(updated.polarCustomerId).toBe("cus_sub_meta");
+  });
+
+  it("finds the account by the customer's email when Polar has verified it", async () => {
+    const { user } = await createAuthedUser("donor@example.test");
+    expect((await send(unlinked("sub_mail", { email: "Donor@Example.test", emailVerified: true }))).status).toBe(200);
+    expect(await tierOf(user.id)).toBe("pro");
+  });
+
+  it("does not go by an email Polar has not verified, or one no account has", async () => {
+    const { user } = await createAuthedUser("careful@example.test");
+    await send(unlinked("sub_unverified", { email: "careful@example.test", emailVerified: false }));
+    await send(unlinked("sub_nobody", { email: "nobody@example.test", emailVerified: true }));
+    expect(await tierOf(user.id)).toBe("free");
+    expect(await db.select().from(subscriptions)).toHaveLength(0);
+    const events = await db.select().from(billingEvents);
+    expect(events.map((e) => e.error)).toEqual(["no external id", "no external id"]);
+  });
+
+  it("keeps later events on the account that holds the subscription", async () => {
+    const { user } = await createAuthedUser("holder@example.test");
+    await send(unlinked("sub_held", { email: "holder@example.test", emailVerified: true }));
+    expect(await tierOf(user.id)).toBe("pro");
+    // The end of the plan arrives with no link and no email to go by.
+    const revoked = subscriptionRevokedPayload({ subscriptionId: "sub_held", customerId: "cus_sub_held", externalId: user.id });
+    const res = await send({
+      ...revoked,
+      timestamp: new Date(Date.now() + 5000).toISOString(),
+      data: { ...revoked.data, customer: { id: "cus_sub_held", externalId: null } },
+    });
+    expect(res.status).toBe(200);
+    expect(await tierOf(user.id)).toBe("free");
+  });
+
+  it("applies a skipped delivery when the same one is sent again", async () => {
+    // First time nobody has this email; the event is recorded and skipped.
+    const payload = unlinked("sub_again", { email: "later@example.test", emailVerified: true });
+    const signed = signEvent(payload, "msg_sent_twice");
+    const deliver = () =>
+      app.handle(new Request(`${APP_URL}/api/billing/webhook`, { method: "POST", headers: signed.headers, body: signed.body }));
+    expect((await deliver()).status).toBe(200);
+    expect(await db.select().from(subscriptions)).toHaveLength(0);
+
+    const { user } = await createAuthedUser("later@example.test");
+    expect((await deliver()).status).toBe(200);
+    expect(await tierOf(user.id)).toBe("pro");
+    const events = await db.select().from(billingEvents);
+    expect(events).toHaveLength(1);
+    expect(events[0].error).toBeNull();
+    // And once applied, a third copy is a duplicate.
+    expect(await (await deliver()).json()).toMatchObject({ deduplicated: true });
+  });
+});
