@@ -1,8 +1,8 @@
 // Tier-aware caps and the /api/me/usage endpoint per ADR-0006.
 //
 // Verifies:
-//   - Free/Anonymous expiry options stay capped at ≤72h (`expiresInHours`
-//     ∉ [1,6,12,24,72] → 400 with `expiry_not_allowed_for_tier`).
+//   - Anonymous links last up to 72h and a free account's up to 168h;
+//     anything else is a 400 with `expiry_not_allowed_for_tier`.
 //   - Pro accepts the longer-retention options (168h / 336h / 720h).
 //   - `/api/me/usage` returns tier-resolved caps and the correct shape
 //     for both Free and Pro.
@@ -52,16 +52,11 @@ const GB = 1024 * 1024 * 1024;
 // ─── Expiry options per tier ─────────────────────────────────────────────────
 
 describe("create-transfer — tier-aware expiry options", () => {
-  it("anonymous request: 72h rejected (72h is Free-and-up)", async () => {
-    // Anonymous caps step below Free everywhere (file size, daily count),
-    // and expiry is no exception: anon tops out at 24h, 72h needs Free.
+  it("anonymous request: 72h (3d) allowed", async () => {
     const res = await app.handle(
       new Request(`${APP_URL}/api/upload/create-transfer`, jsonBody({ expiresInHours: 72 })),
     );
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { code?: string; upgradeUrl?: string };
-    expect(body.code).toBe("expiry_not_allowed_for_tier");
-    expect(body.upgradeUrl).toBe("/pricing");
+    expect(res.status).toBe(200);
   });
 
   it("anonymous request: 24h allowed", async () => {
@@ -81,13 +76,25 @@ describe("create-transfer — tier-aware expiry options", () => {
     expect(body.upgradeUrl).toBe("/pricing");
   });
 
-  it("authed Free user: 168h (7d) rejected", async () => {
+  it("authed Free user: 168h (7d) accepted", async () => {
     const { cookie } = await createAuthedUser();
     const res = await app.handle(
       authedRequest(
         cookie,
         `${APP_URL}/api/upload/create-transfer`,
         jsonBody({ expiresInHours: 168 }),
+      ),
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("authed Free user: 336h (14d) rejected", async () => {
+    const { cookie } = await createAuthedUser();
+    const res = await app.handle(
+      authedRequest(
+        cookie,
+        `${APP_URL}/api/upload/create-transfer`,
+        jsonBody({ expiresInHours: 336 }),
       ),
     );
     expect(res.status).toBe(400);
@@ -141,12 +148,12 @@ describe("create-transfer — tier-aware expiry options", () => {
     const { user, cookie } = await createAuthedUser();
     await db.update(users).set({ tier: "garbage" }).where(eq(users.id, user.id));
 
-    // 168h should be rejected because unknown tier resolves to Free.
+    // 336h is Pro-and-up, so it is refused: an unknown tier resolves to Free.
     const res = await app.handle(
       authedRequest(
         cookie,
         `${APP_URL}/api/upload/create-transfer`,
-        jsonBody({ expiresInHours: 168 }),
+        jsonBody({ expiresInHours: 336 }),
       ),
     );
     expect(res.status).toBe(400);
@@ -182,7 +189,7 @@ describe("GET /api/me/usage", () => {
     expect(body.dailyTransfers.cap).toBe(20);
     expect(body.caps.maxFileSize).toBe(1 * GB);
     expect(body.caps.maxTransferSize).toBe(1 * GB);
-    expect(body.caps.allowedExpiryHours).toEqual([1, 6, 12, 24, 72]);
+    expect(body.caps.allowedExpiryHours).toEqual([1, 6, 12, 24, 72, 168]);
     expect(body.storage).toBeNull();
   });
 
