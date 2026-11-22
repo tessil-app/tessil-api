@@ -422,6 +422,8 @@ export const authRoutes = new Elysia({ prefix: "/api/auth" })
         email: me.email,
         tier: me.tier,
         createdAt: me.createdAt,
+        // The language chosen for this account, or null when none was.
+        locale: me.locale ?? null,
         // The authenticator that minted this session, or null for magic-link
         // / verify-code sessions and any pre-migration rows. Drives the
         // "Used to sign in here" hint on /dashboard/settings.
