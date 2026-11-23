@@ -272,6 +272,12 @@ describe("sharing emails", () => {
     expect(form.subject).toContain("formulieren");
     expect(form.button.url.endsWith("/dashboard/forms/abc123")).toBe(true);
 
+    const several = buildPortalNotice({ kind: "delivery", to: "g@example.test", portalId: "abc123", form: true, count: 3 });
+    expect(several.subject).toBe("3 new responses to one of your Tessil forms");
+    expect(buildPortalNotice({ kind: "delivery", to: "g@example.test", portalId: "abc123" }).subject).toBe(
+      "New files in one of your Tessil portals",
+    );
+
     expect(mailLocale("nl")).toBe("nl");
     expect(mailLocale(null)).toBe("en");
     expect(mailLocale("de")).toBe("en");

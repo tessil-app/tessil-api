@@ -2,13 +2,13 @@
 // the portal's owner. See docs/adr/0014-portal-keys-and-vault-items.md.
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { nanoid } from "nanoid";
 import { createApp } from "../../src/app";
 import { db } from "../../src/db";
 import { portalMembers, portals, transfers, users } from "../../src/db/schema";
 import { eraseAccount } from "../../src/auth/users";
-import { claimDeliveryNotice } from "../../src/services/portal.service";
+import { claimDeliveryNotice, portalsOwedNotice } from "../../src/services/portal.service";
 import { createFile, createTransfer, markOrphanedDepositsDeleted } from "../../src/services/file.service";
 import { peekVolumeLimit, rateLimiters, resetRateLimits } from "../../src/services/ratelimit.service";
 import { authedRequest, createAuthedUser, testIpContext } from "../helpers/auth";
@@ -74,6 +74,15 @@ function addFile(transferId: string, size: number, cookie: string | null = null)
 }
 
 /** A whole deposit by an anonymous outsider. */
+/** Waits for the email claim that follows a completed deposit. */
+async function settled(portalId: string) {
+  for (let i = 0; i < 40; i++) {
+    const [row] = await db.select().from(portals).where(eq(portals.id, portalId));
+    if (row.lastNotifiedAt) return;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
+
 async function deposit(portalId: string, size = 1024) {
   const { res, body } = await startDeposit(portalId);
   expect(res.status).toBe(201);
@@ -541,27 +550,60 @@ describe("a closing date", () => {
 describe("an email when files arrive", () => {
   it("goes to nobody unless the owner switched it on", async () => {
     const { portalId } = await ownerWithPortal();
-    expect(await claimDeliveryNotice(portalId)).toEqual([]);
+    expect(await claimDeliveryNotice(portalId)).toBeNull();
   });
 
-  it("goes to the members once, then waits an hour", async () => {
+  it("goes to the members at once, then waits ten minutes", async () => {
     const { cookie, user, portalId } = await ownerWithPortal();
     await call(cookie, "PATCH", `/api/portals/${portalId}`, { notifyOnDelivery: true });
-    expect(await claimDeliveryNotice(portalId)).toEqual([{ email: user.email, locale: null }]);
-    expect(await claimDeliveryNotice(portalId)).toEqual([]);
+    expect(await claimDeliveryNotice(portalId)).toEqual({ recipients: [{ email: user.email, locale: null }], count: 1 });
+    expect(await claimDeliveryNotice(portalId)).toBeNull();
 
     await db
       .update(portals)
-      .set({ lastNotifiedAt: new Date(Date.now() - 61 * 60_000) })
+      .set({ lastNotifiedAt: new Date(Date.now() - 9 * 60_000) })
       .where(eq(portals.id, portalId));
-    expect(await claimDeliveryNotice(portalId)).toEqual([{ email: user.email, locale: null }]);
+    expect(await claimDeliveryNotice(portalId)).toBeNull();
+  });
+
+  it("says how many arrived during the quiet time, once it has passed", async () => {
+    const { cookie, portalId } = await ownerWithPortal();
+    await call(cookie, "PATCH", `/api/portals/${portalId}`, { notifyOnDelivery: true });
+    const first = await deposit(portalId);
+    await settled(portalId);
+    // Two more while the first email is still fresh: no email for them yet.
+    await deposit(portalId);
+    await deposit(portalId);
+    expect(await portalsOwedNotice()).not.toContain(portalId);
+
+    // As if the first delivery and its email were eleven minutes ago: the
+    // other two are now owed one email that counts them both.
+    await db.execute(sql`UPDATE transfers SET completed_at = now() - interval '12 minutes' WHERE id = ${first.transferId}`);
+    await db.execute(sql`UPDATE portals SET last_notified_at = now() - interval '11 minutes' WHERE id = ${portalId}`);
+    expect(await portalsOwedNotice()).toContain(portalId);
+    expect((await claimDeliveryNotice(portalId))?.count).toBe(2);
+    // Announced now, so nothing is owed any more.
+    expect(await portalsOwedNotice()).not.toContain(portalId);
+  });
+
+  it("does not announce what arrived while the emails were off", async () => {
+    const { cookie, portalId } = await ownerWithPortal();
+    await call(cookie, "PATCH", `/api/portals/${portalId}`, { notifyOnDelivery: true });
+    await deposit(portalId);
+    await settled(portalId);
+    await call(cookie, "PATCH", `/api/portals/${portalId}`, { notifyOnDelivery: false });
+    await deposit(portalId);
+    await call(cookie, "PATCH", `/api/portals/${portalId}`, { notifyOnDelivery: true });
+    const [row] = await db.select().from(portals).where(eq(portals.id, portalId));
+    expect(row.lastNotifiedAt).toBeNull();
+    expect(await portalsOwedNotice()).not.toContain(portalId);
   });
 
   it("is claimed by only one of several deliveries landing together", async () => {
     const { cookie, portalId } = await ownerWithPortal();
     await call(cookie, "PATCH", `/api/portals/${portalId}`, { notifyOnDelivery: true });
     const claims = await Promise.all(Array.from({ length: 8 }, () => claimDeliveryNotice(portalId)));
-    expect(claims.filter((c) => c.length > 0)).toHaveLength(1);
+    expect(claims.filter((c) => c !== null)).toHaveLength(1);
   });
 
   it("is claimed when a deposit completes", async () => {

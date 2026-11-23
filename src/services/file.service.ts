@@ -108,6 +108,7 @@ export async function completeTransfer(
     .update(transfers)
     .set({
       isCompleted: true,
+      completedAt: sql`now()`,
       ...(vaultWrap?.wrappedKey ? { wrappedKey: vaultWrap.wrappedKey } : {}),
       ...(vaultWrap?.sealedKey ? { sealedKey: vaultWrap.sealedKey } : {}),
     })

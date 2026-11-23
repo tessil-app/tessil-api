@@ -1,6 +1,7 @@
 import { createApp } from "./app";
 import { env } from "./config/env";
 import { startCleanupJob } from "./services/cleanup.service";
+import { startDeliveryNoticeSweep } from "./services/deliveryNotice.service";
 import { flushLegacyRateLimitKeys } from "./services/ratelimit.service";
 import { initIpContext } from "./utils/ipContext";
 
@@ -18,6 +19,7 @@ const app = createApp().listen({
 });
 
 startCleanupJob();
+startDeliveryNoticeSweep();
 
 console.log(
   `Tessil API running at ${app.server?.hostname}:${app.server?.port}`,

@@ -17,6 +17,8 @@ export const transfers = pgTable('transfers', {
   maxDownloads: integer('max_downloads'), // NULL = unlimited
   isDeleted: boolean('is_deleted').default(false).notNull(),
   isCompleted: boolean('is_completed').default(false).notNull(),
+  // When the upload finished. NULL while uploading, and on transfers from before this column.
+  completedAt: timestamp('completed_at', { withTimezone: true }),
   passwordHash: varchar('password_hash', { length: 255 }), // NULL = no password
   // Salt the browser used to derive the verifier hashed above. Public,
   // handed to recipients so they can derive the same verifier. NULL on

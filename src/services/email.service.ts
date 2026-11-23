@@ -364,7 +364,7 @@ export type PortalNotice = (
   /** To the guest: the owner handed over access. */
   | { kind: "access_given"; to: string; ownerEmail: string }
   /** To a member: files arrived in a portal that has arrival emails on. */
-  | { kind: "delivery"; to: string; portalId: string }
+  | { kind: "delivery"; to: string; portalId: string; count?: number }
 ) & {
   /** About a form rather than a portal. */
   form?: boolean;
@@ -416,11 +416,13 @@ export function buildPortalNotice(notice: PortalNotice): NoticeContent {
       };
     case "delivery": {
       const d = notice.form ? c.response : c.files;
+      // How many arrived since the last email; one when not told.
+      const n = Math.max(1, notice.count ?? 1);
       return {
         lang,
-        subject: d.subject,
-        heading: d.heading,
-        paragraphs: [d.body, d.why],
+        subject: d.subject(n),
+        heading: d.heading(n),
+        paragraphs: [d.body(n), d.why],
         button: { label: d.button, url: `${list}/${notice.portalId}` },
         footnote: d.footnote,
       };
