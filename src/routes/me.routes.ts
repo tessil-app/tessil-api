@@ -3,6 +3,9 @@
 // an existence oracle.
 
 import { Elysia, t } from "elysia";
+import { eq } from "drizzle-orm";
+import { db } from "../db";
+import { users } from "../db/schema";
 import { authPlugin } from "../auth/middleware";
 import { ipContextPlugin } from "../auth/ipContextPlugin";
 import { logAuthEvent } from "../auth/events";
@@ -10,7 +13,7 @@ import { buildAccountExport, eraseAccount } from "../auth/users";
 import { SESSION_COOKIE_NAME, SESSION_COOKIE_OPTIONS } from "../auth/sessions";
 import { normaliseEmail } from "../auth/tokens";
 import { getFileMetadataForOwnedTransfer, getStoredBytes, listTransfersForUser, setOwnedTransferTitle, softDeleteOwnedTransfer, deleteOwnedTransferFile } from "../services/file.service";
-import { sendAccountDeletedNotification } from "../services/email.service";
+import { mailLocale, sendAccountDeletedNotification } from "../services/email.service";
 import {
   checkRateLimit,
   peekRateLimit,
@@ -29,9 +32,34 @@ const NANOID_PATTERN = /^[A-Za-z0-9_-]{21}$/;
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 50;
 
+/** Languages an account can choose. Mirrors LOCALES in the web app. */
+export const ACCOUNT_LOCALES = ["en", "nl"] as const;
+
 export const meRoutes = new Elysia({ prefix: "/api/me" })
   .use(authPlugin)
   .use(ipContextPlugin)
+
+  // The account's language. null clears the choice.
+  .put(
+    "/locale",
+    async ({ me, body, originRejected, set }) => {
+      if (originRejected) {
+        set.status = 403;
+        return { error: "Forbidden" };
+      }
+      if (!me) {
+        set.status = 401;
+        return { error: "Not authenticated" };
+      }
+      await db.update(users).set({ locale: body.locale }).where(eq(users.id, me.id));
+      return { locale: body.locale };
+    },
+    {
+      body: t.Object({
+        locale: t.Union([...ACCOUNT_LOCALES.map((l) => t.Literal(l)), t.Null()]),
+      }),
+    },
+  )
 
   // Current usage against the authenticated user's tier caps. Reads
   // the rate-limit counters without consuming a slot.
@@ -387,13 +415,14 @@ export const meRoutes = new Elysia({ prefix: "/api/me" })
       // Snapshot email before erasure — we need it for the notification send
       // after the user row is gone.
       const formerEmail = me.email;
+      const formerLocale = mailLocale(me.locale);
 
       await eraseAccount({ user: me, ipContext, userAgent });
 
       // Best-effort notification. The erasure already committed, so
       // a send failure must not turn the response into a 5xx.
       try {
-        await sendAccountDeletedNotification({ to: formerEmail });
+        await sendAccountDeletedNotification({ to: formerEmail, locale: formerLocale });
       } catch (err) {
         console.error("[erasure] account-deleted notification send failed:", err);
       }

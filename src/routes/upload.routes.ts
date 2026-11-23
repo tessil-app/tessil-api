@@ -18,7 +18,7 @@ import { limitFor, resolveCaps } from '../config/tiers';
 import { findUserById } from '../auth/users';
 import { claimDeliveryNotice, getPortal } from '../services/portal.service';
 import { deviceAccess } from '../auth/deviceAuth';
-import { sendPortalNotice } from '../services/email.service';
+import { mailLocale, sendPortalNotice } from '../services/email.service';
 import type { User } from '../db/schema';
 import { exceedsTotalLimit } from '../utils/limits';
 import { authPlugin } from '../auth/middleware';
@@ -61,7 +61,9 @@ async function notifyOfDelivery(portalId: string): Promise<void> {
     const recipients = await claimDeliveryNotice(portalId);
     if (recipients.length === 0) return;
     const form = (await getPortal(portalId))?.kind === 'form';
-    await Promise.all(recipients.map((to) => sendPortalNotice({ kind: 'delivery', to, portalId, form })));
+    await Promise.all(
+      recipients.map((r) => sendPortalNotice({ kind: 'delivery', to: r.email, portalId, form, locale: mailLocale(r.locale) })),
+    );
   } catch (err) {
     console.error('[portal] delivery notice failed', err instanceof Error ? err.message : err);
   }

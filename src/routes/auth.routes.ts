@@ -20,7 +20,7 @@ import {
 } from "../auth/sessions";
 import { findOrCreateUserByEmail } from "../auth/users";
 import { canonicaliseCode, isLikelyEmail, normaliseEmail } from "../auth/tokens";
-import { sendMagicLink } from "../services/email.service";
+import { mailLocale, sendMagicLink } from "../services/email.service";
 import { checkIpRateLimit, checkRateLimit, rateLimiters } from "../services/ratelimit.service";
 
 // Cross-device pending-login cookie. Holds the opaque pending_session_id that
@@ -112,7 +112,7 @@ export const authRoutes = new Elysia({ prefix: "/api/auth" })
 
       try {
         // Silent auto-create. The account exists either way after this call.
-        await findOrCreateUserByEmail(email);
+        const user = await findOrCreateUserByEmail(email);
 
         const { token, pendingSessionId, expiresAt } = await issueMagicLink({
           email,
@@ -124,7 +124,9 @@ export const authRoutes = new Elysia({ prefix: "/api/auth" })
         // bots from consuming the token by prefetching the URL.
         const link = `${env.APP_URL}/signin/verify#token=${encodeURIComponent(token)}`;
 
-        await sendMagicLink({ to: email, link, expiresAt, ipContext, userAgent });
+        // The account's language, else the one the sign-in page was in.
+        const locale = mailLocale(user.locale ?? body.locale);
+        await sendMagicLink({ to: email, link, expiresAt, ipContext, userAgent, locale });
 
         // Bind the code path to this device via a host-only pending
         // cookie. Without this cookie the 6-digit code is useless —
@@ -153,6 +155,8 @@ export const authRoutes = new Elysia({ prefix: "/api/auth" })
     {
       body: t.Object({
         email: t.String({ maxLength: 320 }),
+        // Optional: the language the sign-in page was shown in.
+        locale: t.Optional(t.String({ maxLength: 8 })),
       }),
     },
   )
@@ -422,6 +426,8 @@ export const authRoutes = new Elysia({ prefix: "/api/auth" })
         email: me.email,
         tier: me.tier,
         createdAt: me.createdAt,
+        // The language chosen for this account, or null when none was.
+        locale: me.locale ?? null,
         // The authenticator that minted this session, or null for magic-link
         // / verify-code sessions and any pre-migration rows. Drives the
         // "Used to sign in here" hint on /dashboard/settings.

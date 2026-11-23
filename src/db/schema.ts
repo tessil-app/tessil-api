@@ -136,6 +136,9 @@ export const users = pgTable('users', {
   // to it; the private half lives in vault_items. NULL until the user's
   // vault has generated a keypair.
   publicKey: bytea('public_key'),
+  // The language the account's pages and emails use: 'en' or 'nl'. NULL:
+  // not chosen, so the browser's language decides.
+  locale: varchar('locale', { length: 8 }),
 }, (table) => ({
   emailUnique: uniqueIndex('users_email_unique').on(table.email),
   polarCustomerIdUnique: uniqueIndex('users_polar_customer_id_unique').on(table.polarCustomerId),

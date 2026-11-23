@@ -185,11 +185,11 @@ const NOTICE_INTERVAL = sql`interval '1 hour'`;
 
 /**
  * Claims the right to email a portal's members about a delivery, and
- * returns their addresses. Empty when notices are off or one went out
+ * returns their addresses and languages. Empty when notices are off or one went out
  * within the hour, so a burst of deliveries is one email. The claim is a
  * single conditional update: parallel deliveries cannot both win it.
  */
-export async function claimDeliveryNotice(portalId: string): Promise<string[]> {
+export async function claimDeliveryNotice(portalId: string): Promise<{ email: string; locale: string | null }[]> {
   const claimed = await db
     .update(portals)
     .set({ lastNotifiedAt: sql`now()` })
@@ -203,11 +203,11 @@ export async function claimDeliveryNotice(portalId: string): Promise<string[]> {
     .returning({ id: portals.id });
   if (claimed.length === 0) return [];
   const rows = await db
-    .select({ email: users.email })
+    .select({ email: users.email, locale: users.locale })
     .from(portalMembers)
     .innerJoin(users, eq(users.id, portalMembers.userId))
     .where(and(eq(portalMembers.portalId, portalId), sql`${users.deletedAt} IS NULL`));
-  return rows.map((r) => r.email);
+  return rows;
 }
 
 /**
@@ -461,9 +461,9 @@ export async function removeGuest(
 /** Open invites for an address, with who sent each. Used to tell owners their invitee is ready. */
 export async function listInvitesForEmail(
   email: string,
-): Promise<{ portalId: string; ownerEmail: string; kind: string }[]> {
+): Promise<{ portalId: string; ownerEmail: string; ownerLocale: string | null; kind: string }[]> {
   return db
-    .select({ portalId: portalInvites.portalId, ownerEmail: users.email, kind: portals.kind })
+    .select({ portalId: portalInvites.portalId, ownerEmail: users.email, ownerLocale: users.locale, kind: portals.kind })
     .from(portalInvites)
     .innerJoin(portals, eq(portals.id, portalInvites.portalId))
     .innerJoin(users, eq(users.id, portals.ownerId))

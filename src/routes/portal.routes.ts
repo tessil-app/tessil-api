@@ -27,9 +27,9 @@ import { Elysia, t } from "elysia";
 import { authPlugin } from "../auth/middleware";
 import { ipContextPlugin } from "../auth/ipContextPlugin";
 import { logAuthEvent } from "../auth/events";
-import { findUserById } from "../auth/users";
+import { findUserByEmail, findUserById } from "../auth/users";
 import type { Portal } from "../db/schema";
-import { sendPortalNotice } from "../services/email.service";
+import { mailLocale, sendPortalNotice } from "../services/email.service";
 import {
   answersUrlOf,
   createDeposit,
@@ -746,7 +746,15 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
         return { error: messages[result.reason], code: `invite_${result.reason}` };
       }
       const form = (await getPortal(params.id))?.kind === "form";
-      void sendPortalNotice({ kind: "invited", to: email, ownerEmail: me.email, form });
+      // In their own language when they have an account, else the inviter's.
+      const invitee = await findUserByEmail(email);
+      void sendPortalNotice({
+        kind: "invited",
+        to: email,
+        ownerEmail: me.email,
+        form,
+        locale: mailLocale(invitee?.locale ?? me.locale),
+      });
       set.status = 201;
       return { id: result.inviteId };
     },
@@ -835,7 +843,9 @@ export const portalRoutes = new Elysia({ prefix: "/api/portals" })
       });
       const guest = await findUserById(result.userId);
       const form = (await getPortal(params.id))?.kind === "form";
-      if (guest) void sendPortalNotice({ kind: "access_given", to: guest.email, ownerEmail: me.email, form });
+      if (guest) {
+        void sendPortalNotice({ kind: "access_given", to: guest.email, ownerEmail: me.email, form, locale: mailLocale(guest.locale) });
+      }
       set.status = 201;
       return { userId: result.userId };
     },

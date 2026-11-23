@@ -1,4 +1,4 @@
-// Scaleway Transactional Email integration. Transactional only —
+// Scaleway Transactional Email integration. Transactional only,
 // no marketing, per Scaleway TEM ToS.
 //
 // In dev when SCW_TEM credentials are not configured, the magic
@@ -7,6 +7,9 @@
 
 import { env } from "../config/env";
 import type { IpContext } from "../utils/ipContext";
+import { emailCopy, mailLocale, type MailLocale } from "./emailCopy";
+
+export { mailLocale, type MailLocale };
 
 interface SendMagicLinkInput {
   to: string;
@@ -20,9 +23,10 @@ interface SendMagicLinkInput {
    */
   ipContext: IpContext;
   userAgent: string | null;
+  locale?: MailLocale;
 }
 
-function formatLocation(ipContext: IpContext): string {
+function formatLocation(ipContext: IpContext, unknown: string): string {
   const parts: string[] = [];
   if (ipContext.city) parts.push(ipContext.city);
   if (ipContext.country && ipContext.country !== "unknown") parts.push(ipContext.country);
@@ -33,7 +37,7 @@ function formatLocation(ipContext: IpContext): string {
   if (location && asn) return `${location} · ${asn}`;
   if (location) return location;
   if (asn) return asn;
-  return "unknown";
+  return unknown;
 }
 
 const SCW_TEM_ENDPOINT = (region: string) =>
@@ -43,58 +47,59 @@ function isConfigured(): boolean {
   return Boolean(env.SCW_TEM_PROJECT_ID && env.SCW_TEM_SECRET_KEY);
 }
 
-function buildMagicLinkSubject(): string {
-  return "Your Tessil sign-in link";
+const BODY_STYLE =
+  'font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;line-height:1.5;color:#111;max-width:560px;margin:24px auto;padding:0 16px;';
+const BUTTON_STYLE =
+  "display:inline-block;padding:12px 20px;background:#111;color:#fff;text-decoration:none;border-radius:8px;";
+
+function minutesLeft(expiresAt: Date): number {
+  return Math.max(1, Math.round((expiresAt.getTime() - Date.now()) / 60000));
 }
 
-function buildMagicLinkText({ link, expiresAt, ipContext, userAgent }: SendMagicLinkInput): string {
-  const expiresIn = Math.max(1, Math.round((expiresAt.getTime() - Date.now()) / 60000));
+function buildMagicLinkText({ link, expiresAt, ipContext, userAgent, locale }: SendMagicLinkInput): string {
+  const c = emailCopy[mailLocale(locale)];
   return [
-    "Sign in to Tessil",
+    c.magic.heading,
     "",
-    "Click the link below to sign in. It expires in " +
-      expiresIn +
-      " minutes and can only be used once.",
+    c.magic.intro(minutesLeft(expiresAt)),
     "",
     link,
     "",
-    "If you open this link on a different device than the one you started",
-    "signing in on, we'll show you a short code to type back into your",
-    "original device — no sign-in happens on the wrong device.",
+    c.magic.otherDevice,
     "",
-    "Request details:",
-    `  Location: ${formatLocation(ipContext)}`,
-    `  Browser: ${userAgent ?? "unknown"}`,
+    `${c.magic.details}:`,
+    `  ${c.magic.location}: ${formatLocation(ipContext, c.unknown)}`,
+    `  ${c.magic.browser}: ${userAgent ?? c.unknown}`,
     "",
-    "We show approximate location and network rather than your IP address.",
-    "Tessil does not store the IP itself.",
+    c.magic.noIp,
     "",
-    "If you didn't request this, ignore this email — no account changes were made.",
+    c.magic.notYou,
     "",
-    "— Tessil",
+    c.signoff,
   ].join("\n");
 }
 
 function buildMagicLinkHtml(input: SendMagicLinkInput): string {
-  const expiresIn = Math.max(1, Math.round((input.expiresAt.getTime() - Date.now()) / 60000));
-  // Minimal inline-styled HTML — no tracking pixels, no remote assets.
+  const lang = mailLocale(input.locale);
+  const c = emailCopy[lang];
+  // Minimal inline-styled HTML: no tracking pixels, no remote assets.
   return [
     "<!doctype html>",
-    '<html lang="en"><head><meta charset="utf-8"><title>Sign in to Tessil</title></head>',
-    '<body style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;line-height:1.5;color:#111;max-width:560px;margin:24px auto;padding:0 16px;">',
-    '  <h1 style="font-size:20px;margin:0 0 16px;">Sign in to Tessil</h1>',
-    `  <p>Click the button below to sign in. The link expires in <strong>${expiresIn} minutes</strong> and can only be used once.</p>`,
-    `  <p style="margin:24px 0;"><a href="${escapeHtml(input.link)}" style="display:inline-block;padding:12px 20px;background:#111;color:#fff;text-decoration:none;border-radius:8px;">Sign in to Tessil</a></p>`,
-    `  <p style="font-size:13px;color:#555;">Or paste this URL into your browser:<br><code style="word-break:break-all;">${escapeHtml(input.link)}</code></p>`,
-    '  <p style="font-size:13px;color:#555;">Opening this link on a different device than the one you started signing in on will show you a short code to type back into your original device — no sign-in happens on the wrong device.</p>',
+    `<html lang="${lang}"><head><meta charset="utf-8"><title>${c.magic.heading}</title></head>`,
+    `<body style="${BODY_STYLE}">`,
+    `  <h1 style="font-size:20px;margin:0 0 16px;">${c.magic.heading}</h1>`,
+    `  <p>${c.magic.introHtml(minutesLeft(input.expiresAt))}</p>`,
+    `  <p style="margin:24px 0;"><a href="${escapeHtml(input.link)}" style="${BUTTON_STYLE}">${c.magic.button}</a></p>`,
+    `  <p style="font-size:13px;color:#555;">${c.magic.paste}<br><code style="word-break:break-all;">${escapeHtml(input.link)}</code></p>`,
+    `  <p style="font-size:13px;color:#555;">${escapeHtml(c.magic.otherDevice)}</p>`,
     '  <hr style="border:none;border-top:1px solid #eee;margin:24px 0;">',
-    '  <p style="font-size:12px;color:#666;">Request details — Location: ' +
-      escapeHtml(formatLocation(input.ipContext)) +
-      " &middot; Browser: " +
-      escapeHtml(input.userAgent ?? "unknown") +
+    `  <p style="font-size:12px;color:#666;">${c.magic.details}: ${c.magic.location}: ` +
+      escapeHtml(formatLocation(input.ipContext, c.unknown)) +
+      ` &middot; ${c.magic.browser}: ` +
+      escapeHtml(input.userAgent ?? c.unknown) +
       "</p>",
-    '  <p style="font-size:12px;color:#666;">We show approximate location and network rather than your IP address. Tessil does not store the IP itself.</p>',
-    '  <p style="font-size:12px;color:#666;">If you didn\'t request this, ignore this email — no account changes were made.</p>',
+    `  <p style="font-size:12px;color:#666;">${escapeHtml(c.magic.noIp)}</p>`,
+    `  <p style="font-size:12px;color:#666;">${escapeHtml(c.magic.notYou)}</p>`,
     "</body></html>",
   ].join("\n");
 }
@@ -110,37 +115,25 @@ function escapeHtml(s: string): string {
 
 interface SendAccountDeletedInput {
   to: string;
+  locale?: MailLocale;
 }
 
-function buildAccountDeletedSubject(): string {
-  return "Your Tessil account was deleted";
+function buildAccountDeletedText({ to, locale }: SendAccountDeletedInput): string {
+  const c = emailCopy[mailLocale(locale)].deleted;
+  return [c.body, "", c.notYou(to), "", c.noCopies, "", emailCopy.en.signoff].join("\n");
 }
 
-function buildAccountDeletedText({ to }: SendAccountDeletedInput): string {
-  return [
-    "Your Tessil account and all associated transfers were permanently deleted just now.",
-    "",
-    "If you did this, no further action is needed. If you did not request this deletion, your account may have been accessed by someone else — we recommend rotating the credentials on the email address used to sign in (" +
-      to +
-      "), and reviewing other services where you used the same address.",
-    "",
-    "We don't retain copies. The account and its files cannot be restored.",
-    "",
-    "— Tessil",
-  ].join("\n");
-}
-
-function buildAccountDeletedHtml({ to }: SendAccountDeletedInput): string {
+function buildAccountDeletedHtml({ to, locale }: SendAccountDeletedInput): string {
+  const lang = mailLocale(locale);
+  const c = emailCopy[lang].deleted;
   return [
     "<!doctype html>",
-    '<html lang="en"><head><meta charset="utf-8"><title>Your Tessil account was deleted</title></head>',
-    '<body style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;line-height:1.5;color:#111;max-width:560px;margin:24px auto;padding:0 16px;">',
-    '  <h1 style="font-size:20px;margin:0 0 16px;">Your Tessil account was deleted</h1>',
-    "  <p>Your Tessil account and all associated transfers were permanently deleted just now.</p>",
-    "  <p>If you did this, no further action is needed. If you did not request this deletion, your account may have been accessed by someone else — we recommend rotating the credentials on the email address used to sign in (<strong>" +
-      escapeHtml(to) +
-      "</strong>), and reviewing other services where you used the same address.</p>",
-    '  <p style="font-size:13px;color:#555;">We don\'t retain copies. The account and its files cannot be restored.</p>',
+    `<html lang="${lang}"><head><meta charset="utf-8"><title>${c.subject}</title></head>`,
+    `<body style="${BODY_STYLE}">`,
+    `  <h1 style="font-size:20px;margin:0 0 16px;">${c.subject}</h1>`,
+    `  <p>${escapeHtml(c.body)}</p>`,
+    `  <p>${escapeHtml(c.notYou(to))}</p>`,
+    `  <p style="font-size:13px;color:#555;">${escapeHtml(c.noCopies)}</p>`,
     "</body></html>",
   ].join("\n");
 }
@@ -148,7 +141,7 @@ function buildAccountDeletedHtml({ to }: SendAccountDeletedInput): string {
 export async function sendAccountDeletedNotification(input: SendAccountDeletedInput): Promise<void> {
   if (!isConfigured()) {
     console.log(
-      `[email] SCW_TEM not configured — logging account-deleted notification instead.\n  to: ${input.to}`,
+      `[email] SCW_TEM not configured, logging account-deleted notification instead.\n  to: ${input.to}`,
     );
     return;
   }
@@ -157,7 +150,7 @@ export async function sendAccountDeletedNotification(input: SendAccountDeletedIn
     from: { email: env.EMAIL_FROM, name: env.EMAIL_FROM_NAME },
     to: [{ email: input.to }],
     project_id: env.SCW_TEM_PROJECT_ID,
-    subject: buildAccountDeletedSubject(),
+    subject: emailCopy[mailLocale(input.locale)].deleted.subject,
     text: buildAccountDeletedText(input),
     html: buildAccountDeletedHtml(input),
     ...(env.EMAIL_REPLY_TO
@@ -197,22 +190,21 @@ interface SendSessionAnomalyInput {
   currentAsnOrg: string | null;
   /** ASN integer from the current request. May be null. */
   currentAsn: number | null;
-  /** User-agent from the session at create — disambiguates which session. */
+  /** User-agent from the session at create, to tell which session. */
   sessionUserAgent: string | null;
   /** When the affected session was created. */
   sessionCreatedAt: Date;
   /** Absolute URL to /dashboard/settings, where the user can sign out everywhere. */
   settingsUrl: string;
+  locale?: MailLocale;
 }
 
-// Resolves an ISO-2 country code to its English display name via the
-// platform's `Intl.DisplayNames`. Falls back to the raw code (or "unknown"
-// when both code and name are missing) so the email always has something
-// readable.
-function countryName(iso2: string | null): string {
-  if (!iso2) return "an unknown location";
+// The country's name in the reader's language, or the raw code when the
+// platform does not know it.
+function countryName(iso2: string | null, locale: MailLocale = "en"): string {
+  if (!iso2) return emailCopy[locale].unknownPlace;
   try {
-    const dn = new Intl.DisplayNames(["en"], { type: "region" });
+    const dn = new Intl.DisplayNames([locale], { type: "region" });
     return dn.of(iso2.toUpperCase()) ?? iso2;
   } catch {
     return iso2;
@@ -223,75 +215,60 @@ function formatAnomalyNetwork(
   country: string | null,
   asnOrg: string | null,
   asn: number | null,
+  locale: MailLocale = "en",
 ): string {
-  const place = countryName(country);
+  const place = countryName(country, locale);
   const org = asnOrg ?? (asn ? `AS${asn}` : null);
   return org ? `${place} (${org})` : place;
 }
 
-function buildSessionAnomalySubject(): string {
-  return "Heads up — your Tessil session is being used from a new network";
+function anomalyParts(input: SendSessionAnomalyInput) {
+  const lang = mailLocale(input.locale);
+  return {
+    lang,
+    c: emailCopy[lang].anomaly,
+    previous: formatAnomalyNetwork(input.previousCountry, input.previousAsnOrg, input.previousAsn, lang),
+    current: formatAnomalyNetwork(input.currentCountry, input.currentAsnOrg, input.currentAsn, lang),
+    createdAt: input.sessionCreatedAt.toISOString().slice(0, 10),
+  };
 }
 
 function buildSessionAnomalyText(input: SendSessionAnomalyInput): string {
-  const previous = formatAnomalyNetwork(
-    input.previousCountry,
-    input.previousAsnOrg,
-    input.previousAsn,
-  );
-  const current = formatAnomalyNetwork(
-    input.currentCountry,
-    input.currentAsnOrg,
-    input.currentAsn,
-  );
-  const createdAt = input.sessionCreatedAt.toISOString().slice(0, 10);
+  const { c, previous, current, createdAt } = anomalyParts(input);
   return [
-    "We noticed a change of network on one of your Tessil sessions.",
+    c.noticed,
     "",
-    `Your session previously seen from ${previous} is now being used from ${current}.`,
+    c.moved(previous, current),
     "",
-    `Affected session: signed in on ${createdAt}` +
-      (input.sessionUserAgent ? ` from "${input.sessionUserAgent}"` : ""),
+    c.session(createdAt) + (input.sessionUserAgent ? ` ${c.from} "${input.sessionUserAgent}"` : ""),
     "",
-    "If this wasn't you, sign out everywhere from your dashboard settings:",
+    c.ifNot,
     input.settingsUrl,
     "",
-    "If this was you (you're travelling, on a VPN, or switched networks),",
-    "you can ignore this email. We won't sign you out automatically.",
+    c.ifYou,
     "",
-    "We show approximate country and network rather than your IP address.",
-    "Tessil does not store the IP itself.",
+    c.noIp,
     "",
-    "— Tessil",
+    emailCopy.en.signoff,
   ].join("\n");
 }
 
 function buildSessionAnomalyHtml(input: SendSessionAnomalyInput): string {
-  const previous = formatAnomalyNetwork(
-    input.previousCountry,
-    input.previousAsnOrg,
-    input.previousAsn,
-  );
-  const current = formatAnomalyNetwork(
-    input.currentCountry,
-    input.currentAsnOrg,
-    input.currentAsn,
-  );
-  const createdAt = input.sessionCreatedAt.toISOString().slice(0, 10);
+  const { lang, c, previous, current, createdAt } = anomalyParts(input);
   const sessionLine = input.sessionUserAgent
-    ? `Affected session: signed in on ${createdAt} from <code>${escapeHtml(input.sessionUserAgent)}</code>`
-    : `Affected session: signed in on ${createdAt}`;
+    ? `${c.session(createdAt)} ${c.from} <code>${escapeHtml(input.sessionUserAgent)}</code>`
+    : c.session(createdAt);
   return [
     "<!doctype html>",
-    '<html lang="en"><head><meta charset="utf-8"><title>Tessil session change</title></head>',
-    '<body style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;line-height:1.5;color:#111;max-width:560px;margin:24px auto;padding:0 16px;">',
-    '  <h1 style="font-size:20px;margin:0 0 16px;">A Tessil session is on a new network</h1>',
-    `  <p>Your session previously seen from <strong>${escapeHtml(previous)}</strong> is now being used from <strong>${escapeHtml(current)}</strong>.</p>`,
+    `<html lang="${lang}"><head><meta charset="utf-8"><title>${c.title}</title></head>`,
+    `<body style="${BODY_STYLE}">`,
+    `  <h1 style="font-size:20px;margin:0 0 16px;">${c.heading}</h1>`,
+    `  <p>${c.moved(`<strong>${escapeHtml(previous)}</strong>`, `<strong>${escapeHtml(current)}</strong>`)}</p>`,
     `  <p style="font-size:13px;color:#555;">${sessionLine}</p>`,
-    `  <p style="margin:24px 0;"><a href="${escapeHtml(input.settingsUrl)}" style="display:inline-block;padding:12px 20px;background:#111;color:#fff;text-decoration:none;border-radius:8px;">Sign out everywhere</a></p>`,
-    '  <p style="font-size:13px;color:#555;">If this was you (you\'re travelling, on a VPN, or switched networks), you can ignore this email. We won\'t sign you out automatically.</p>',
+    `  <p style="margin:24px 0;"><a href="${escapeHtml(input.settingsUrl)}" style="${BUTTON_STYLE}">${c.button}</a></p>`,
+    `  <p style="font-size:13px;color:#555;">${escapeHtml(c.ifYou)}</p>`,
     '  <hr style="border:none;border-top:1px solid #eee;margin:24px 0;">',
-    '  <p style="font-size:12px;color:#666;">We show approximate country and network rather than your IP address. Tessil does not store the IP itself.</p>',
+    `  <p style="font-size:12px;color:#666;">${escapeHtml(c.noIp)}</p>`,
     "</body></html>",
   ].join("\n");
 }
@@ -301,7 +278,7 @@ export async function sendSessionAnomalyNotification(
 ): Promise<void> {
   if (!isConfigured()) {
     console.log(
-      `[email] SCW_TEM not configured — logging session-anomaly notification instead.\n  to: ${input.to}\n  previous: ${formatAnomalyNetwork(input.previousCountry, input.previousAsnOrg, input.previousAsn)}\n  current: ${formatAnomalyNetwork(input.currentCountry, input.currentAsnOrg, input.currentAsn)}`,
+      `[email] SCW_TEM not configured, logging session-anomaly notification instead.\n  to: ${input.to}\n  previous: ${formatAnomalyNetwork(input.previousCountry, input.previousAsnOrg, input.previousAsn)}\n  current: ${formatAnomalyNetwork(input.currentCountry, input.currentAsnOrg, input.currentAsn)}`,
     );
     return;
   }
@@ -310,7 +287,7 @@ export async function sendSessionAnomalyNotification(
     from: { email: env.EMAIL_FROM, name: env.EMAIL_FROM_NAME },
     to: [{ email: input.to }],
     project_id: env.SCW_TEM_PROJECT_ID,
-    subject: buildSessionAnomalySubject(),
+    subject: emailCopy[mailLocale(input.locale)].anomaly.subject,
     text: buildSessionAnomalyText(input),
     html: buildSessionAnomalyHtml(input),
     ...(env.EMAIL_REPLY_TO
@@ -339,7 +316,7 @@ export async function sendSessionAnomalyNotification(
 export async function sendMagicLink(input: SendMagicLinkInput): Promise<void> {
   if (!isConfigured()) {
     console.log(
-      `[email] SCW_TEM not configured — logging magic link instead.\n  to: ${input.to}\n  link: ${input.link}\n  expires: ${input.expiresAt.toISOString()}`,
+      `[email] SCW_TEM not configured, logging magic link instead.\n  to: ${input.to}\n  link: ${input.link}\n  expires: ${input.expiresAt.toISOString()}`,
     );
     return;
   }
@@ -348,7 +325,7 @@ export async function sendMagicLink(input: SendMagicLinkInput): Promise<void> {
     from: { email: env.EMAIL_FROM, name: env.EMAIL_FROM_NAME },
     to: [{ email: input.to }],
     project_id: env.SCW_TEM_PROJECT_ID,
-    subject: buildMagicLinkSubject(),
+    subject: emailCopy[mailLocale(input.locale)].magic.subject,
     text: buildMagicLinkText(input),
     html: buildMagicLinkHtml(input),
     ...(env.EMAIL_REPLY_TO
@@ -391,9 +368,12 @@ export type PortalNotice = (
 ) & {
   /** About a form rather than a portal. */
   form?: boolean;
+  /** The recipient's language. */
+  locale?: MailLocale;
 };
 
 interface NoticeContent {
+  lang: MailLocale;
   subject: string;
   heading: string;
   paragraphs: string[];
@@ -403,82 +383,63 @@ interface NoticeContent {
 
 export function buildPortalNotice(notice: PortalNotice): NoticeContent {
   const noun = notice.form ? "form" : "portal";
+  const lang = mailLocale(notice.locale);
+  const c = emailCopy[lang].notice;
   const list = `${env.APP_URL}/dashboard/${noun}s`;
   switch (notice.kind) {
     case "invited":
       return {
-        subject: `${notice.ownerEmail} wants to share a Tessil ${noun} with you`,
-        heading: `You're invited to a ${noun}`,
-        paragraphs: [
-          notice.form
-            ? `${notice.ownerEmail} wants to share a form with you on Tessil. A form is a link through which other people answer their questions, encrypted so only its members can read the answers.`
-            : `${notice.ownerEmail} wants to share a portal with you on Tessil. A portal is a link through which other people send them files, encrypted so only its members can open them.`,
-          "Sign in with this email address and set up a vault. A free account is enough. They can then give you access, and we'll email you when they have.",
-        ],
-        button: { label: "Sign in to Tessil", url: list },
-        footnote: `If you don't know ${notice.ownerEmail}, ignore this email. Nothing happens unless you sign in.`,
+        lang,
+        subject: c.invited.subject(notice.ownerEmail, noun),
+        heading: c.invited.heading(noun),
+        paragraphs: [c.invited.what(notice.ownerEmail, noun), c.invited.next],
+        button: { label: c.invited.button, url: list },
+        footnote: c.invited.footnote(notice.ownerEmail),
       };
     case "invitee_ready":
       return {
-        subject: `${notice.inviteeEmail} is ready for your ${noun}`,
-        heading: "Your invite is ready",
-        paragraphs: [
-          `${notice.inviteeEmail} has signed in and set up a vault. Open the ${noun} and choose Sharing to give them access.`,
-          `This step happens in your browser, because only you hold the ${noun}'s keys.`,
-        ],
-        button: { label: `Open the ${noun}`, url: `${list}/${notice.portalId}` },
-        footnote: `You're getting this because you invited them to a ${noun}.`,
+        lang,
+        subject: c.ready.subject(notice.inviteeEmail, noun),
+        heading: c.ready.heading,
+        paragraphs: [c.ready.body(notice.inviteeEmail, noun), c.ready.why(noun)],
+        button: { label: c.ready.button(noun), url: `${list}/${notice.portalId}` },
+        footnote: c.ready.footnote(noun),
       };
     case "access_given":
       return {
-        subject: `${notice.ownerEmail} shared a Tessil ${noun} with you`,
-        heading: `A ${noun} was shared with you`,
-        paragraphs: [
-          `${notice.ownerEmail} gave you access to a ${noun}. Open your ${noun}s and accept it to see ${notice.form ? "the responses" : "the files sent to it"}.`,
-        ],
-        button: { label: `View your ${noun}s`, url: list },
-        footnote: `If you don't know ${notice.ownerEmail}, you can decline it there.`,
+        lang,
+        subject: c.given.subject(notice.ownerEmail, noun),
+        heading: c.given.heading(noun),
+        paragraphs: [c.given.body(notice.ownerEmail, noun)],
+        button: { label: c.given.button(noun), url: list },
+        footnote: c.given.footnote(notice.ownerEmail),
       };
-    case "delivery":
-      if (notice.form) {
-        return {
-          subject: "A new response to one of your Tessil forms",
-          heading: "A new response arrived",
-          paragraphs: [
-            "Someone filled in one of your forms. Open it to read their answers.",
-            "We can't tell you which form by name or what was answered: both are encrypted and only you can read them.",
-          ],
-          button: { label: "Open the form", url: `${list}/${notice.portalId}` },
-          footnote:
-            "At most one of these per form per hour. The form's owner can switch them off in its settings.",
-        };
-      }
+    case "delivery": {
+      const d = notice.form ? c.response : c.files;
       return {
-        subject: "New files in one of your Tessil portals",
-        heading: "New files arrived",
-        paragraphs: [
-          "Someone sent files through one of your portals. Open it to see what came in.",
-          "We can't tell you which portal by name or what was sent: both are encrypted and only you can read them.",
-        ],
-        button: { label: "Open the portal", url: `${list}/${notice.portalId}` },
-        footnote:
-          "At most one of these per portal per hour. The portal's owner can switch them off in its settings.",
+        lang,
+        subject: d.subject,
+        heading: d.heading,
+        paragraphs: [d.body, d.why],
+        button: { label: d.button, url: `${list}/${notice.portalId}` },
+        footnote: d.footnote,
       };
+    }
   }
 }
 
 function noticeText(c: NoticeContent): string {
-  return [c.heading, "", ...c.paragraphs.flatMap((p) => [p, ""]), c.button.url, "", c.footnote, "", "Tessil"].join("\n");
+  return [c.heading, "", ...c.paragraphs.flatMap((p) => [p, ""]), c.button.url, "", c.footnote, "", emailCopy.en.signoff].join("\n");
 }
 
 function noticeHtml(c: NoticeContent): string {
   return [
     "<!doctype html>",
-    `<html lang="en"><head><meta charset="utf-8"><title>${escapeHtml(c.heading)}</title></head>`,
-    '<body style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;line-height:1.5;color:#111;max-width:560px;margin:24px auto;padding:0 16px;">',
+    `<html lang="${c.lang}"><head><meta charset="utf-8"><title>${escapeHtml(c.heading)}</title></head>`,
+    `<body style="${BODY_STYLE}">`,
     `  <h1 style="font-size:20px;margin:0 0 16px;">${escapeHtml(c.heading)}</h1>`,
     ...c.paragraphs.map((p) => `  <p>${escapeHtml(p)}</p>`),
-    `  <p style="margin:24px 0;"><a href="${escapeHtml(c.button.url)}" style="display:inline-block;padding:12px 20px;background:#111;color:#fff;text-decoration:none;border-radius:8px;">${escapeHtml(c.button.label)}</a></p>`,
+    `  <p style="margin:24px 0;"><a href="${escapeHtml(c.button.url)}" style="${BUTTON_STYLE}">${escapeHtml(c.button.label)}</a></p>`,
     `  <p style="font-size:12px;color:#666;">${escapeHtml(c.footnote)}</p>`,
     "</body></html>",
   ].join("\n");

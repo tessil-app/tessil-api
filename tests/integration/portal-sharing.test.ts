@@ -262,4 +262,18 @@ describe("sharing emails", () => {
     const given = buildPortalNotice({ kind: "access_given", to: "g@example.test", ownerEmail: "o@example.test" });
     expect(given.paragraphs.join(" ")).toContain("accept");
   });
+
+  it("speak the recipient's language, and English when it is unknown", async () => {
+    const { buildPortalNotice, mailLocale } = await import("../../src/services/email.service");
+    const dutch = buildPortalNotice({ kind: "invited", to: "g@example.test", ownerEmail: "o@example.test", locale: "nl" });
+    expect(dutch.lang).toBe("nl");
+    expect(dutch.subject).toBe("o@example.test wil een Tessil-portaal met je delen");
+    const form = buildPortalNotice({ kind: "delivery", to: "g@example.test", portalId: "abc123", form: true, locale: "nl" });
+    expect(form.subject).toContain("formulieren");
+    expect(form.button.url.endsWith("/dashboard/forms/abc123")).toBe(true);
+
+    expect(mailLocale("nl")).toBe("nl");
+    expect(mailLocale(null)).toBe("en");
+    expect(mailLocale("de")).toBe("en");
+  });
 });

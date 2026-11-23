@@ -197,6 +197,13 @@
       "when": 1795029407883,
       "tag": "0027_form_templates",
       "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1795363126846,
+      "tag": "0028_user_locale",
+      "breakpoints": true
     }
   ]
 }

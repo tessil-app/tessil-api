@@ -18,7 +18,8 @@ import { timingSafeEqual } from "node:crypto";
 import { env } from "../config/env";
 import type { Session } from "../db/schema";
 import { logAuthEvent } from "./events";
-import { sendSessionAnomalyNotification } from "../services/email.service";
+import { mailLocale, sendSessionAnomalyNotification } from "../services/email.service";
+import { findUserById } from "./users";
 import type { IpContext } from "../utils/ipContext";
 
 const DEDUP_TTL_MS = 60 * 60 * 1000; // 1 hour — bounds duplicate writes.
@@ -99,7 +100,9 @@ export async function detectAndReportSessionAnomaly(input: DetectInput): Promise
 
   if (!env.ENABLE_SESSION_ANOMALY_EMAIL) return;
   try {
+    const locale = mailLocale((await findUserById(input.userId))?.locale);
     await sendSessionAnomalyNotification({
+      locale,
       to: input.email,
       previousCountry: storedCountry,
       previousAsnOrg: session.asnOrg,

@@ -11,7 +11,7 @@
 //   PUT    /api/me/vault/passkeys/:authenticatorId  (auth, let a passkey unlock the vault)
 //   DELETE /api/me/vault/passkeys/:authenticatorId  (auth, stop that)
 
-import { sendPortalNotice } from "../services/email.service";
+import { mailLocale, sendPortalNotice } from "../services/email.service";
 import { listInvitesForEmail } from "../services/portal.service";
 import { Elysia, t } from "elysia";
 import { authPlugin } from "../auth/middleware";
@@ -275,6 +275,7 @@ export const vaultRoutes = new Elysia({ prefix: "/api/me/vault" })
                 inviteeEmail: me.email,
                 portalId: i.portalId,
                 form: i.kind === "form",
+                locale: mailLocale(i.ownerLocale),
               }),
             ),
           ),
