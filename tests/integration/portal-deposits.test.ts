@@ -547,14 +547,14 @@ describe("an email when files arrive", () => {
   it("goes to the members once, then waits an hour", async () => {
     const { cookie, user, portalId } = await ownerWithPortal();
     await call(cookie, "PATCH", `/api/portals/${portalId}`, { notifyOnDelivery: true });
-    expect(await claimDeliveryNotice(portalId)).toEqual([user.email]);
+    expect(await claimDeliveryNotice(portalId)).toEqual([{ email: user.email, locale: null }]);
     expect(await claimDeliveryNotice(portalId)).toEqual([]);
 
     await db
       .update(portals)
       .set({ lastNotifiedAt: new Date(Date.now() - 61 * 60_000) })
       .where(eq(portals.id, portalId));
-    expect(await claimDeliveryNotice(portalId)).toEqual([user.email]);
+    expect(await claimDeliveryNotice(portalId)).toEqual([{ email: user.email, locale: null }]);
   });
 
   it("is claimed by only one of several deliveries landing together", async () => {

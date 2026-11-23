@@ -13,7 +13,7 @@ import { buildAccountExport, eraseAccount } from "../auth/users";
 import { SESSION_COOKIE_NAME, SESSION_COOKIE_OPTIONS } from "../auth/sessions";
 import { normaliseEmail } from "../auth/tokens";
 import { getFileMetadataForOwnedTransfer, getStoredBytes, listTransfersForUser, setOwnedTransferTitle, softDeleteOwnedTransfer, deleteOwnedTransferFile } from "../services/file.service";
-import { sendAccountDeletedNotification } from "../services/email.service";
+import { mailLocale, sendAccountDeletedNotification } from "../services/email.service";
 import {
   checkRateLimit,
   peekRateLimit,
@@ -415,13 +415,14 @@ export const meRoutes = new Elysia({ prefix: "/api/me" })
       // Snapshot email before erasure — we need it for the notification send
       // after the user row is gone.
       const formerEmail = me.email;
+      const formerLocale = mailLocale(me.locale);
 
       await eraseAccount({ user: me, ipContext, userAgent });
 
       // Best-effort notification. The erasure already committed, so
       // a send failure must not turn the response into a 5xx.
       try {
-        await sendAccountDeletedNotification({ to: formerEmail });
+        await sendAccountDeletedNotification({ to: formerEmail, locale: formerLocale });
       } catch (err) {
         console.error("[erasure] account-deleted notification send failed:", err);
       }
