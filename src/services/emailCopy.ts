@@ -83,20 +83,30 @@ const en = {
       footnote: (owner: string) => `If you don't know ${owner}, you can decline it there.`,
     },
     response: {
-      subject: "A new response to one of your Tessil forms",
-      heading: "A new response arrived",
-      body: "Someone filled in one of your forms. Open it to read their answers.",
+      subject: (n: number) =>
+        n === 1 ? "A new response to one of your Tessil forms" : `${n} new responses to one of your Tessil forms`,
+      heading: (n: number) => (n === 1 ? "A new response arrived" : `${n} new responses arrived`),
+      body: (n: number) =>
+        n === 1
+          ? "Someone filled in one of your forms. Open it to read their answers."
+          : `One of your forms was filled in ${n} times since our last email. Open it to read the answers.`,
       why: "We can't tell you which form by name or what was answered: both are encrypted and only you can read them.",
       button: "Open the form",
-      footnote: "At most one of these per form per hour. The form's owner can switch them off in its settings.",
+      footnote:
+        "The first response is announced at once; after that at most one email per form every 10 minutes, with the number that arrived. The form's owner can switch these off in its settings.",
     },
     files: {
-      subject: "New files in one of your Tessil portals",
-      heading: "New files arrived",
-      body: "Someone sent files through one of your portals. Open it to see what came in.",
+      subject: (n: number) =>
+        n === 1 ? "New files in one of your Tessil portals" : `${n} new deliveries in one of your Tessil portals`,
+      heading: (n: number) => (n === 1 ? "New files arrived" : `${n} new deliveries arrived`),
+      body: (n: number) =>
+        n === 1
+          ? "Someone sent files through one of your portals. Open it to see what came in."
+          : `Files were sent through one of your portals ${n} times since our last email. Open it to see what came in.`,
       why: "We can't tell you which portal by name or what was sent: both are encrypted and only you can read them.",
       button: "Open the portal",
-      footnote: "At most one of these per portal per hour. The portal's owner can switch them off in its settings.",
+      footnote:
+        "The first delivery is announced at once; after that at most one email per portal every 10 minutes, with the number that arrived. The portal's owner can switch these off in its settings.",
     },
   },
 };
@@ -179,20 +189,34 @@ const nl: typeof en = {
       footnote: (owner: string) => `Ken je ${owner} niet? Dan kun je het daar afwijzen.`,
     },
     response: {
-      subject: "Een nieuwe inzending op een van je Tessil-formulieren",
-      heading: "Er is een nieuwe inzending",
-      body: "Iemand heeft een van je formulieren ingevuld. Open het om de antwoorden te lezen.",
+      subject: (n: number) =>
+        n === 1
+          ? "Een nieuwe inzending op een van je Tessil-formulieren"
+          : `${n} nieuwe inzendingen op een van je Tessil-formulieren`,
+      heading: (n: number) => (n === 1 ? "Er is een nieuwe inzending" : `Er zijn ${n} nieuwe inzendingen`),
+      body: (n: number) =>
+        n === 1
+          ? "Iemand heeft een van je formulieren ingevuld. Open het om de antwoorden te lezen."
+          : `Een van je formulieren is ${n} keer ingevuld sinds onze vorige e-mail. Open het om de antwoorden te lezen.`,
       why: "We kunnen niet zeggen welk formulier of wat er is geantwoord: beide zijn versleuteld en alleen jij kunt ze lezen.",
       button: "Open het formulier",
-      footnote: "Hooguit één per formulier per uur. De eigenaar van het formulier kan ze uitzetten in de instellingen.",
+      footnote:
+        "De eerste inzending melden we meteen; daarna hooguit één e-mail per formulier per 10 minuten, met het aantal dat binnenkwam. De eigenaar van het formulier kan dit uitzetten in de instellingen.",
     },
     files: {
-      subject: "Nieuwe bestanden in een van je Tessil-portalen",
-      heading: "Er zijn nieuwe bestanden",
-      body: "Iemand heeft bestanden gestuurd via een van je portalen. Open het om te zien wat er binnenkwam.",
+      subject: (n: number) =>
+        n === 1
+          ? "Nieuwe bestanden in een van je Tessil-portalen"
+          : `${n} nieuwe leveringen in een van je Tessil-portalen`,
+      heading: (n: number) => (n === 1 ? "Er zijn nieuwe bestanden" : `Er zijn ${n} nieuwe leveringen`),
+      body: (n: number) =>
+        n === 1
+          ? "Iemand heeft bestanden gestuurd via een van je portalen. Open het om te zien wat er binnenkwam."
+          : `Via een van je portalen zijn ${n} keer bestanden gestuurd sinds onze vorige e-mail. Open het om te zien wat er binnenkwam.`,
       why: "We kunnen niet zeggen welk portaal of wat er is gestuurd: beide zijn versleuteld en alleen jij kunt ze lezen.",
       button: "Open het portaal",
-      footnote: "Hooguit één per portaal per uur. De eigenaar van het portaal kan ze uitzetten in de instellingen.",
+      footnote:
+        "De eerste levering melden we meteen; daarna hooguit één e-mail per portaal per 10 minuten, met het aantal dat binnenkwam. De eigenaar van het portaal kan dit uitzetten in de instellingen.",
     },
   },
 };

@@ -16,9 +16,9 @@ import {
 } from '../services/ratelimit.service';
 import { limitFor, resolveCaps } from '../config/tiers';
 import { findUserById } from '../auth/users';
-import { claimDeliveryNotice, getPortal } from '../services/portal.service';
+import { getPortal } from '../services/portal.service';
+import { notifyOfDelivery } from '../services/deliveryNotice.service';
 import { deviceAccess } from '../auth/deviceAuth';
-import { mailLocale, sendPortalNotice } from '../services/email.service';
 import type { User } from '../db/schema';
 import { exceedsTotalLimit } from '../utils/limits';
 import { authPlugin } from '../auth/middleware';
@@ -52,21 +52,6 @@ async function depositTarget(portalId: string): Promise<{ owner: User } | null> 
   const owner = await findUserById(portal.ownerId);
   if (!owner || owner.deletedAt || limitFor(resolveCaps(owner), portal.kind) === 0) return null;
   return { owner };
-}
-
-// Tells a portal's members that files arrived, when its owner asked for
-// that. Never throws: the delivery has already succeeded.
-async function notifyOfDelivery(portalId: string): Promise<void> {
-  try {
-    const recipients = await claimDeliveryNotice(portalId);
-    if (recipients.length === 0) return;
-    const form = (await getPortal(portalId))?.kind === 'form';
-    await Promise.all(
-      recipients.map((r) => sendPortalNotice({ kind: 'delivery', to: r.email, portalId, form, locale: mailLocale(r.locale) })),
-    );
-  } catch (err) {
-    console.error('[portal] delivery notice failed', err instanceof Error ? err.message : err);
-  }
 }
 
 function decodeBase64Url(input: string): Uint8Array | null {

@@ -175,40 +175,88 @@ export async function updateOwnedPortal(
 ): Promise<boolean> {
   const updated = await db
     .update(portals)
-    .set(changes)
+    .set({
+      ...changes,
+      // Switching the emails on starts from now: what arrived while they were
+      // off is not announced. The right side reads the row as it was.
+      ...(changes.notifyOnDelivery === true
+        ? { lastNotifiedAt: sql`CASE WHEN ${portals.notifyOnDelivery} THEN ${portals.lastNotifiedAt} ELSE NULL END` }
+        : {}),
+    })
     .where(and(eq(portals.id, portalId), eq(portals.ownerId, ownerId)))
     .returning({ id: portals.id });
   return updated.length > 0;
 }
 
-const NOTICE_INTERVAL = sql`interval '1 hour'`;
+// How long after one email about a portal the next may go out.
+const NOTICE_INTERVAL = sql`interval '10 minutes'`;
+
+export interface DeliveryNotice {
+  recipients: { email: string; locale: string | null }[];
+  /** Deliveries that finished since the last email; 1 for the first ever. */
+  count: number;
+}
 
 /**
- * Claims the right to email a portal's members about a delivery, and
- * returns their addresses and languages. Empty when notices are off or one went out
- * within the hour, so a burst of deliveries is one email. The claim is a
- * single conditional update: parallel deliveries cannot both win it.
+ * Claims the right to email a portal's members about deliveries, and returns
+ * who to tell and how many arrived since the last email. Null when notices
+ * are off or one went out within the interval, so a burst is one email; what
+ * arrives in between is announced by the sweep once the interval has passed.
+ * The claim locks the portal's row: parallel deliveries cannot both win it.
  */
-export async function claimDeliveryNotice(portalId: string): Promise<{ email: string; locale: string | null }[]> {
-  const claimed = await db
-    .update(portals)
-    .set({ lastNotifiedAt: sql`now()` })
-    .where(
-      and(
-        eq(portals.id, portalId),
-        eq(portals.notifyOnDelivery, true),
-        sql`(${portals.lastNotifiedAt} IS NULL OR ${portals.lastNotifiedAt} < now() - ${NOTICE_INTERVAL})`,
-      ),
+export async function claimDeliveryNotice(portalId: string): Promise<DeliveryNotice | null> {
+  const claimed = await db.execute<{ prev: Date | string | null }>(sql`
+    WITH prev AS (
+      SELECT id, last_notified_at FROM portals
+      WHERE id = ${portalId}
+        AND notify_on_delivery
+        AND (last_notified_at IS NULL OR last_notified_at < now() - ${NOTICE_INTERVAL})
+      FOR UPDATE
     )
-    .returning({ id: portals.id });
-  if (claimed.length === 0) return [];
-  const rows = await db
+    UPDATE portals p SET last_notified_at = now()
+    FROM prev WHERE p.id = prev.id
+    RETURNING prev.last_notified_at AS prev
+  `);
+  const row = [...claimed][0];
+  if (!row) return null;
+
+  let arrived = 1;
+  if (row.prev !== null) {
+    const [n] = await db
+      .select({ n: count() })
+      .from(transfers)
+      .where(
+        and(
+          eq(transfers.portalId, portalId),
+          eq(transfers.isCompleted, true),
+          sql`${transfers.completedAt} > ${new Date(row.prev).toISOString()}::timestamptz`,
+        ),
+      );
+    arrived = n?.n ?? 0;
+  }
+  const recipients = await db
     .select({ email: users.email, locale: users.locale })
     .from(portalMembers)
     .innerJoin(users, eq(users.id, portalMembers.userId))
     .where(and(eq(portalMembers.portalId, portalId), sql`${users.deletedAt} IS NULL`));
-  return rows;
+  return { recipients, count: arrived };
 }
+
+/** Portals with deliveries nobody was emailed about, whose quiet interval has passed. */
+export async function portalsOwedNotice(): Promise<string[]> {
+  const rows = await db
+    .select({ id: portals.id })
+    .from(portals)
+    .where(
+      and(
+        eq(portals.notifyOnDelivery, true),
+        sql`${portals.lastNotifiedAt} < now() - ${NOTICE_INTERVAL}`,
+        sql`EXISTS (SELECT 1 FROM ${transfers} WHERE ${transfers.portalId} = ${portals.id} AND ${transfers.isCompleted} AND ${transfers.completedAt} > ${portals.lastNotifiedAt})`,
+      ),
+    );
+  return rows.map((r) => r.id);
+}
+
 
 /**
  * Owner-scoped delete; members go with it. Deposits are marked deleted in

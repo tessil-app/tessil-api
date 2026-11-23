@@ -204,6 +204,13 @@
       "when": 1795363126846,
       "tag": "0028_user_locale",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1795458260517,
+      "tag": "0029_transfer_completed_at",
+      "breakpoints": true
     }
   ]
 }
