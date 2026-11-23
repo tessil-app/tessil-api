@@ -27,6 +27,7 @@ sudo install -d -m 0755 /etc/nginx/snippets
 sudo install -m 0644 nginx/snippets/security-headers.conf  /etc/nginx/snippets/tessil-security-headers.conf
 sudo install -m 0644 nginx/snippets/api-tolerances.conf    /etc/nginx/snippets/tessil-api-tolerances.conf
 sudo install -m 0644 nginx/snippets/download-route.conf    /etc/nginx/snippets/tessil-download-route.conf
+sudo install -m 0644 nginx/snippets/web-routing.conf       /etc/nginx/snippets/tessil-web-routing.conf
 ```
 
 ### Wire them into the vhosts
@@ -43,17 +44,31 @@ server {
     include snippets/tessil-download-route.conf;   # robots-noindex on /d/*
 
     # ... rest of existing config ...
-    # Two blocks, and both matter:
-
-    location = / {
-        try_files /index.html =404;
-    }
-
-    location / {
-        try_files $uri $uri.html /200.html /index.html;
-    }
+    include snippets/tessil-web-routing.conf;      # pages, 404s, app routes
 }
 ```
+
+`tessil-web-routing.conf` holds the `location = /` and `location /` blocks, so
+the vhost must not have its own. It answers 404 for addresses that are not
+pages (search engines count a 200 with the app shell as a soft 404) and keeps
+200 for the routes drawn in the browser: `/d/`, `/p/`, `/f/`, `/forms/try` and
+`/dashboard/`. A new browser-only route needs adding there.
+
+After installing, check:
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+for p in / /security /nl/prijzen /compare/zivver-alternative /llms.txt /dashboard /dashboard/portals/abc \
+         /p/abc /f/abc /d/abc /forms/try /does-not-exist; do
+  printf "%-36s %s\n" "$p" "$(curl -s -o /dev/null -w '%{http_code}' https://tessil.app$p)"
+done
+curl -sI https://tessil.app/compare/zivver-alternative.md | grep -i content-type   # text/markdown
+```
+
+Everything should be 200 except `/does-not-exist` (404). If a page comes back
+404, put the old `location /` block back and reload.
+
+The older two-block setup, kept for reference:
 
 **Why it is two blocks.** `$uri.html` serves the prerendered pages
 (`/compare/x` -> `compare/x.html`, `/security` -> `security.html`). `/200.html`
